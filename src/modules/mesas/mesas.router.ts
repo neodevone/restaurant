@@ -15,8 +15,8 @@ mesasRouter.use(authMiddleware);
 
 // ── Zonas ─────────────────────────────────────────────
 mesasRouter.get( '/zonas',             requireRol('Administrador', 'Mesero', 'Cajero'), getZonas);
-mesasRouter.post('/zonas',             requireAdmin, postZona);
-mesasRouter.patch('/zonas/:id/toggle', requireAdmin, patchZonaToggle);
+mesasRouter.post('/zonas',             requireRol('Administrador', 'Cajero'), postZona);
+mesasRouter.patch('/zonas/:id/toggle', requireRol('Administrador', 'Cajero'), patchZonaToggle);
 
 // ── Mesas ─────────────────────────────────────────────
 // ?conPedido=true  → mapa visual con info del pedido activo
