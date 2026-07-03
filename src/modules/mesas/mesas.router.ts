@@ -23,9 +23,19 @@ mesasRouter.patch('/zonas/:id/toggle', requireAdmin, patchZonaToggle);
 // ?zonaID=xxx      → filtrar por zona
 mesasRouter.get( '/',               requireRol('Administrador', 'Mesero', 'Cajero'), getMesas);
 mesasRouter.get( '/:id',            requireRol('Administrador', 'Mesero', 'Cajero'), getMesa);
-mesasRouter.post('/',               requireAdmin, postMesa);
-mesasRouter.patch('/:id',           requireAdmin, patchMesa);
-mesasRouter.patch('/:id/toggle',    requireAdmin, patchMesaToggle);
+// Crear mesas
+mesasRouter.post('/',
+  requireRol('Administrador', 'Cajero'),  // ← era requireAdmin
+  postMesa);
+
+// Editar Mesas
+mesasRouter.patch('/:id',
+  requireRol('Administrador', 'Cajero'),  // ← era requireAdmin
+  patchMesa);
+// Activar/desactivar mesa
+mesasRouter.patch('/:id/toggle',
+  requireRol('Administrador', 'Cajero'),  // ← era requireAdmin
+  patchMesaToggle);
 
 // Estado — mesero y cajero pueden cambiar estado en operación
 mesasRouter.patch('/:id/estado',
