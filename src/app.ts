@@ -54,6 +54,9 @@ app.use('/api', limiter);
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+app.set('trust proxy', 1);  // ← agregar aquí
+app.use(express.json());
+
 // ── Health check (no requiere auth) ─────────────────
 app.get('/health', (_req, res) => {
   res.json({
