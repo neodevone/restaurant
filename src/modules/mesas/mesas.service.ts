@@ -49,6 +49,7 @@ export async function listarZonas(): Promise<Zona[]> {
       Activa  AS activa,
       Orden   AS orden
     FROM modu_rest_Zonas
+    WHERE Activa = 1   -- ← agregar
     ORDER BY Orden, Nombre
   `);
 }
