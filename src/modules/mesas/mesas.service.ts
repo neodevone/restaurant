@@ -170,7 +170,9 @@ export async function crearMesa(data: {
   const existente = await query<{ total: number }>(`
     SELECT COUNT(*) AS total
     FROM modu_rest_Mesas
-    WHERE ZonaID = @zonaID AND Alias = @alias
+    WHERE ZonaID = @zonaID 
+      AND Alias = @alias
+      AND Activa = 1
   `, (req) => {
     req.input('zonaID', sql.UniqueIdentifier, data.zonaID);
     req.input('alias',  sql.NVarChar,         data.alias);
