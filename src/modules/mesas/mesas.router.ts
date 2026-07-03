@@ -6,7 +6,7 @@ import { requireAdmin, requireRol } from '../../middlewares/rol.middleware';
 import {
   getZonas, postZona, patchZonaToggle,
   getMesas, getMesa, postMesa,
-  patchMesa, patchEstadoMesa, patchMesaToggle
+  patchMesa, patchEstadoMesa, patchMesaToggle, patchPosicionMesa
 } from './mesas.controller';
 
 export const mesasRouter = Router();
@@ -31,4 +31,10 @@ mesasRouter.patch('/:id/toggle',    requireAdmin, patchMesaToggle);
 mesasRouter.patch('/:id/estado',
   requireRol('Administrador', 'Mesero', 'Cajero'),
   patchEstadoMesa
+);
+
+// Guardar posición desde el editor visual
+mesasRouter.patch('/:id/posicion',
+  requireRol('Administrador', 'Cajero'),
+  patchPosicionMesa
 );

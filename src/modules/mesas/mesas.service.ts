@@ -249,3 +249,20 @@ export async function toggleMesa(mesaID: string, activa: boolean): Promise<void>
     req.input('mesaID', sql.UniqueIdentifier, mesaID);
   });
 }
+
+export async function actualizarPosicionMesa(
+  mesaID: string,
+  posicionX: number,
+  posicionY: number
+): Promise<void> {
+  await query(`
+    UPDATE modu_rest_Mesas
+    SET PosicionX = @posicionX,
+        PosicionY = @posicionY
+    WHERE MesaID = @mesaID
+  `, (req) => {
+    req.input('mesaID',    sql.UniqueIdentifier, mesaID);
+    req.input('posicionX', sql.Int,              posicionX);
+    req.input('posicionY', sql.Int,              posicionY);
+  });
+}

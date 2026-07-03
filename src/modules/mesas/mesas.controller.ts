@@ -7,7 +7,7 @@ import { registrarEvento } from '../../shared/eventos.service';
 import {
   listarZonas, crearZona, toggleZona,
   listarMesas, listarMesasConPedido, obtenerMesa,
-  crearMesa, actualizarMesa, cambiarEstadoMesa, toggleMesa
+  crearMesa, actualizarMesa, cambiarEstadoMesa, toggleMesa, actualizarPosicionMesa
 } from './mesas.service';
 
 // ── Schemas ──────────────────────────────────────────
@@ -164,5 +164,22 @@ export async function patchMesaToggle(
     }
     await toggleMesa(req.params.id as string, activa);
     respond.ok(res, null, `Mesa ${activa ? 'activada' : 'desactivada'}`);
+  } catch (err) { next(err); }
+}
+
+export async function patchPosicionMesa(
+  req: Request, res: Response, next: NextFunction
+) {
+  try {
+    const { posicionX, posicionY } = req.body;
+    if (posicionX === undefined || posicionY === undefined) {
+      respond.badRequest(res, 'posicionX y posicionY son requeridos');
+      return;
+    }
+    await actualizarPosicionMesa(
+      req.params.id as string,
+      posicionX, posicionY
+    );
+    respond.ok(res, null, 'Posición actualizada');
   } catch (err) { next(err); }
 }
