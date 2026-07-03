@@ -61,7 +61,7 @@ export async function crearZona(data: { nombre: string; orden?: number }): Promi
     VALUES (@nombre, @orden)
   `, (req) => {
     req.input('nombre', sql.NVarChar, data.nombre);
-    req.input('orden',  sql.Int,      data.orden ?? 0);
+    req.input('orden',  sql.Int,      data.orden ?? 99);
   });
 
   const zonas = await query<Zona>(`
