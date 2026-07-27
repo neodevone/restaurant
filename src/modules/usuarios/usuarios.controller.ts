@@ -5,7 +5,7 @@ import Joi from 'joi';
 import { respond } from '../../shared/response.helper';
 import {
   listarUsuarios, obtenerUsuario, crearUsuario,
-  actualizarUsuario, cambiarPassword, toggleUsuario, listarRoles
+  actualizarUsuario, cambiarPassword, toggleActivo as toggleActivoService , listarRoles
 } from './usuarios.service';
 
 const crearSchema = Joi.object({
@@ -99,7 +99,7 @@ export async function toggleActivo(req: Request, res: Response, next: NextFuncti
       respond.badRequest(res, 'El campo activo debe ser true o false');
       return;
     }
-    await toggleUsuario(req.params.id as string, activo);
+    await toggleActivoService(req.params.id as string, activo);  // ← era toggleUsuario
     respond.ok(res, null, `Usuario ${activo ? 'activado' : 'desactivado'}`);
   } catch (err) { next(err); }
 }
