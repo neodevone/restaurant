@@ -4,13 +4,14 @@
 import { Request, Response, NextFunction } from 'express';
 
 import { respond } from '../../shared/response.helper';
-import { 
-  listarCategorias, 
-  listarArticulos, 
-  obtenerArticulo, 
-  guardarImagenArticulo, 
-  eliminarImagenArticulo } 
-from './articulos.service';
+import {
+  listarCategorias,
+  listarArticulos,
+  obtenerArticulo,
+  guardarImagenArticulo,
+  eliminarImagenArticulo
+}
+  from './articulos.service';
 
 // ── Categorías ───────────────────────────────────────
 
@@ -54,7 +55,7 @@ export async function getArticulo(
 }
 
 // ── Subir imagen ─────────────────────────────────────
- 
+
 export async function postImagen(
   req: Request,
   res: Response,
@@ -74,16 +75,18 @@ export async function postImagen(
     }
 
     const baseUrl = `${req.protocol}://${req.get('host')}`;
-    const imagenURL = `${baseUrl}/imagenes/articulos/${id}.jpg`;
+
+    const timestamp = Date.now();
+    const imagenURL = `${baseUrl}/imagenes/articulos/${id}.jpg?v=${timestamp}`;
 
     await guardarImagenArticulo(id, imagenURL);
 
     respond.ok(res, { imagenURL }, 'Imagen actualizada correctamente');
   } catch (err) { next(err); }
 }
- 
+
 // ── Eliminar imagen ───────────────────────────────────
- 
+
 export async function deleteImagen(
   req: Request, res: Response, next: NextFunction
 ) {
@@ -93,7 +96,7 @@ export async function deleteImagen(
       respond.badRequest(res, 'El ID debe ser un número entero');
       return;
     }
- 
+
     await eliminarImagenArticulo(id);
     respond.ok(res, null, 'Imagen eliminada correctamente');
   } catch (err) { next(err); }
