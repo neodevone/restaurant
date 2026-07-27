@@ -36,6 +36,7 @@ const actualizarSchema = Joi.object({
   rolID:    Joi.string().uuid().optional(),
   nombre:   Joi.string().min(2).max(100).optional(),
   apellido: Joi.string().min(2).max(100).optional(),
+  usuario:  Joi.string().min(3).max(50).optional(),
   pin:      Joi.string().length(4).pattern(/^\d+$/).allow(null).optional(),
 }).min(1).messages({
   'object.min': 'Debes enviar al menos un campo para actualizar',
