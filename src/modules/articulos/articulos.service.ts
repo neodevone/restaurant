@@ -4,6 +4,8 @@
 
 import { query, sql } from '../../config/database';
 import { AppError } from '../../middlewares/error.middleware';
+import path from 'path';
+import fs from 'fs';
 
 // ── Interfaces ───────────────────────────────────────
 
@@ -100,4 +102,59 @@ export async function obtenerArticulo(articuloID: number): Promise<Articulo> {
 
   if (rows.length === 0) throw new AppError('Artículo no encontrado', 404);
   return rows[0];
+}
+
+// ── IMÁGENES ──────────────────────────────────────────
+ 
+export async function guardarImagenArticulo(
+  articuloID: number,
+  imagenURL: string
+): Promise<void> {
+  // Verificar si ya tiene imagen
+  const existente = await query<{ total: number }>(`
+    SELECT COUNT(*) AS total
+    FROM modu_rest_ArticulosImagenes
+    WHERE IdArticulo = @articuloID
+  `, (req) => {
+    req.input('articuloID', sql.Int, articuloID);
+  });
+ 
+  if (existente[0].total > 0) {
+    // Actualizar
+    await query(`
+      UPDATE modu_rest_ArticulosImagenes
+      SET ImagenURL = @imagenURL
+      WHERE IdArticulo = @articuloID
+    `, (req) => {
+      req.input('articuloID', sql.Int,      articuloID);
+      req.input('imagenURL',  sql.NVarChar, imagenURL);
+    });
+  } else {
+    // Insertar
+    await query(`
+      INSERT INTO modu_rest_ArticulosImagenes (IdArticulo, ImagenURL)
+      VALUES (@articuloID, @imagenURL)
+    `, (req) => {
+      req.input('articuloID', sql.Int,      articuloID);
+      req.input('imagenURL',  sql.NVarChar, imagenURL);
+    });
+  }
+}
+ 
+export async function eliminarImagenArticulo(articuloID: number): Promise<void> {
+  // Eliminar archivo físico
+  const filePath = path.join(
+    __dirname, '../../public/imagenes/articulos', `${articuloID}.jpg`
+  );
+  if (fs.existsSync(filePath)) {
+    fs.unlinkSync(filePath);
+  }
+ 
+  // Eliminar de BD
+  await query(`
+    DELETE FROM modu_rest_ArticulosImagenes
+    WHERE IdArticulo = @articuloID
+  `, (req) => {
+    req.input('articuloID', sql.Int, articuloID);
+  });
 }
