@@ -13,13 +13,15 @@ export const usuariosRouter = Router();
 // Todos los endpoints requieren estar autenticado
 usuariosRouter.use(authMiddleware);
 
-// Roles disponibles — cualquier autenticado puede verlos (para formularios)
-usuariosRouter.get('/roles', roles);
+const rolesGestion = requireRol('Administrador', 'Cajero');
 
-// Solo el administrador gestiona usuarios
-usuariosRouter.get('/',           requireAdmin, listar);
-usuariosRouter.get('/:id',        requireAdmin, obtener);
-usuariosRouter.post('/',          requireAdmin, crear);
-usuariosRouter.patch('/:id',      requireAdmin, actualizar);
-usuariosRouter.patch('/:id/password', requireAdmin, cambiarPass);
-usuariosRouter.patch('/:id/toggle',   requireAdmin, toggleActivo);
+// Roles disponibles
+usuariosRouter.get('/roles', rolesGestion, roles);
+
+// Gestión de usuarios — Admin y Cajero
+usuariosRouter.get('/',                   rolesGestion, listar);
+usuariosRouter.get('/:id',                rolesGestion, obtener);
+usuariosRouter.post('/',                  rolesGestion, crear);
+usuariosRouter.patch('/:id',              rolesGestion, actualizar);
+usuariosRouter.patch('/:id/password',     rolesGestion, cambiarPass);
+usuariosRouter.patch('/:id/toggle',       rolesGestion, toggleActivo);
