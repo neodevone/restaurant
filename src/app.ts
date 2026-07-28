@@ -5,7 +5,7 @@ import express from 'express';
 import { createServer } from 'http';
 import cors from 'cors';
 import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
+//import rateLimit from 'express-rate-limit';
 import path from 'path';
 
 import { env } from './config/environment';
@@ -41,6 +41,8 @@ app.use(cors({
 app.use('/imagenes', express.static(path.join(__dirname, '../public/imagenes')));
 
 // Rate limiting — máximo 200 requests por IP cada 10 minutos
+
+/*
 const limiter = rateLimit({
   windowMs: 10 * 60 * 1000,
   max: 200,
@@ -49,6 +51,7 @@ const limiter = rateLimit({
   legacyHeaders: false,
 });
 app.use('/api', limiter);
+*/
 
 // ── Parsers ──────────────────────────────────────────
 app.use(express.json({ limit: '1mb' }));
