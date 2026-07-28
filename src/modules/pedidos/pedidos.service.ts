@@ -8,42 +8,42 @@ import { cambiarEstadoMesa } from '../mesas/mesas.service';
 // ── Interfaces ───────────────────────────────────────
 
 export interface Pedido {
-  pedidoID: string;
-  mesaID: string | null;
-  mesaAlias: string | null;
-  meseroID: string;
-  mesero: string;
-  numeroPedido: number;
-  tipoPedido: string;
-  nombreCliente: string | null;
+  pedidoID:       string;
+  mesaID:         string | null;
+  mesaAlias:      string | null;
+  meseroID:       string;
+  mesero:         string;
+  numeroPedido:   number;
+  tipoPedido:     string;
+  nombreCliente:  string | null;
   numeroPersonas: number;
-  fechaApertura: string;
-  fechaCierre: string | null;
-  estadoPedido: string;
-  subtotal: number;
+  fechaApertura:  string;
+  fechaCierre:    string | null;
+  estadoPedido:   string;
+  subtotal:       number;
   totalImpuestos: number;
   totalDescuento: number;
-  totalCuenta: number;
+  totalCuenta:    number;
   notasGenerales: string | null;
-  facturado: boolean;
+  facturado:      boolean;
 }
 
 export interface ItemPedido {
-  articuloID: number;       // INT — Id del sistema existente
-  cantidad: number;
+  articuloID:       number;
+  cantidad:         number;
   notasEspeciales?: string;
 }
 
 export interface AbrirPedidoDTO {
-  mesaID?: string;
-  tipoPedido?: 'Mesa' | 'Para Llevar' | 'Domicilio';
-  nombreCliente?: string;
+  mesaID?:         string;
+  tipoPedido?:     'Mesa' | 'Para Llevar' | 'Domicilio';
+  nombreCliente?:  string;
   numeroPersonas?: number;
   notasGenerales?: string;
-  items: ItemPedido[];
+  items:           ItemPedido[];
 }
 
-// ── Helpers ──────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────
 
 async function siguienteNumeroPedido(): Promise<number> {
   const rows = await query<{ siguiente: number }>(`
@@ -54,35 +54,31 @@ async function siguienteNumeroPedido(): Promise<number> {
   return rows[0].siguiente;
 }
 
-// Obtiene precio vigente de la tabla articulo del sistema existente
+// Lee precio de venta del sistema existente — ya incluye IVA
 async function obtenerPrecioArticulo(articuloID: number): Promise<{
-  nombre: string;
+  nombre:      string;
   precioVenta: number;
-  porcentajeIVA: number;
 }> {
   const rows = await query<{
-    nombre: string;
+    nombre:      string;
     precioVenta: number;
-    porcentajeIVA: number;
   }>(`
     SELECT
-      a.Nombre                    AS nombre,
-      a.Venta                     AS precioVenta,
-      ISNULL(t.Num, 0)            AS porcentajeIVA
+      a.Nombre AS nombre,
+      a.Venta  AS precioVenta
     FROM articulo a
-    LEFT JOIN tarifas t ON a.Idiva = t.Id
     WHERE a.Id = @articuloID AND a.Estado = 1
   `, (req) => {
     req.input('articuloID', sql.Int, articuloID);
   });
 
-  if (rows.length === 0) {
+  if (rows.length === 0)
     throw new AppError(`El artículo ${articuloID} no existe o está inactivo`, 400);
-  }
+
   return rows[0];
 }
 
-// ── Obtener pedido ───────────────────────────────────
+// ── Obtener pedido ────────────────────────────────────
 
 export async function obtenerPedido(pedidoID: string): Promise<Pedido> {
   const rows = await query<Pedido>(`
@@ -117,23 +113,21 @@ export async function obtenerPedido(pedidoID: string): Promise<Pedido> {
   return rows[0];
 }
 
-// ── Detalle del pedido ───────────────────────────────
+// ── Detalle del pedido ────────────────────────────────
 
 export async function obtenerDetallePedido(pedidoID: string) {
   return query(`
     SELECT
-      cd.DetalleID              AS detalleID,
-      cd.IdArticulo             AS articuloID,
-      cd.NombreArticulo         AS articulo,
-      cd.Cantidad               AS cantidad,
-      cd.PrecioVentaHistorico   AS precioUnitario,
-      cd.PorcentajeIVA          AS porcentajeIVA,
-      cd.MontoIVA               AS montoIVA,
-      cd.MontoDescuento         AS montoDescuento,
-      cd.Subtotal               AS subtotal,
-      cd.EstadoItem             AS estadoItem,
-      cd.NotasEspeciales        AS notasEspeciales,
-      cd.HoraPedido             AS horaPedido
+      cd.DetalleID            AS detalleID,
+      cd.IdArticulo           AS articuloID,
+      cd.NombreArticulo       AS articulo,
+      cd.Cantidad             AS cantidad,
+      cd.PrecioVentaHistorico AS precioUnitario,
+      cd.MontoDescuento       AS montoDescuento,
+      cd.Subtotal             AS subtotal,
+      cd.EstadoItem           AS estadoItem,
+      cd.NotasEspeciales      AS notasEspeciales,
+      cd.HoraPedido           AS horaPedido
     FROM modu_rest_ComandaDetalle cd
     WHERE cd.PedidoID = @pedidoID
     ORDER BY cd.HoraPedido
@@ -142,12 +136,12 @@ export async function obtenerDetallePedido(pedidoID: string) {
   });
 }
 
-// ── Listar pedidos ───────────────────────────────────
+// ── Listar pedidos ────────────────────────────────────
 
 export async function listarPedidos(filtros: {
   estado?: string;
   mesaID?: string;
-  fecha?: string;
+  fecha?:  string;
 }): Promise<Pedido[]> {
   return query<Pedido>(`
     SELECT
@@ -184,14 +178,14 @@ export async function listarPedidos(filtros: {
   });
 }
 
-// ── Abrir pedido ─────────────────────────────────────
+// ── Abrir pedido ──────────────────────────────────────
 
 export async function abrirPedido(
   meseroID: string,
   data: AbrirPedidoDTO
 ): Promise<Pedido> {
 
-  // 1. Verificar que la mesa esté libre si viene con mesa
+  // 1. Verificar que la mesa esté libre
   if (data.mesaID) {
     const mesaOcupada = await query<{ total: number }>(`
       SELECT COUNT(*) AS total
@@ -202,29 +196,24 @@ export async function abrirPedido(
       req.input('mesaID', sql.UniqueIdentifier, data.mesaID!);
     });
 
-    if (mesaOcupada[0].total > 0) {
+    if (mesaOcupada[0].total > 0)
       throw new AppError('Esta mesa ya tiene un pedido activo', 409);
-    }
   }
 
-  // 2. Calcular totales leyendo precios de la tabla articulo
+  // 2. Calcular totales — precio ya incluye IVA, NO calcular encima
   let subtotal = 0;
-  let totalImpuestos = 0;
 
   const itemsConPrecio = await Promise.all(
     data.items.map(async (item) => {
-      const art = await obtenerPrecioArticulo(item.articuloID);
-      const montoIVA    = art.precioVenta * item.cantidad * (art.porcentajeIVA / 100);
+      const art          = await obtenerPrecioArticulo(item.articuloID);
       const itemSubtotal = art.precioVenta * item.cantidad;
-
-      subtotal       += itemSubtotal;
-      totalImpuestos += montoIVA;
-
-      return { ...item, ...art, montoIVA, itemSubtotal };
+      subtotal          += itemSubtotal;
+      return { ...item, ...art, itemSubtotal };
     })
   );
 
-  const totalCuenta  = subtotal + totalImpuestos;
+  // TotalCuenta = Subtotal (sin IVA adicional)
+  const totalCuenta  = subtotal;
   const numeroPedido = await siguienteNumeroPedido();
 
   // 3. Crear el pedido
@@ -232,14 +221,14 @@ export async function abrirPedido(
     INSERT INTO modu_rest_Pedidos (
       MesaID, MeseroID, NumeroPedido, TipoPedido,
       NombreCliente, NumeroPersonas, EstadoPedido,
-      Subtotal, TotalImpuestos, TotalCuenta,
+      Subtotal, TotalImpuestos, TotalDescuento, TotalCuenta,
       NotasGenerales, MesaAlias
     )
     OUTPUT INSERTED.PedidoID
     VALUES (
       @mesaID, @meseroID, @numeroPedido, @tipoPedido,
       @nombreCliente, @numeroPersonas, 'Abierto',
-      @subtotal, @totalImpuestos, @totalCuenta,
+      @subtotal, 0, 0, @totalCuenta,
       @notasGenerales,
       (SELECT Alias FROM modu_rest_Mesas WHERE MesaID = @mesaID)
     )
@@ -251,7 +240,6 @@ export async function abrirPedido(
     req.input('nombreCliente',  sql.NVarChar,         data.nombreCliente ?? null);
     req.input('numeroPersonas', sql.Int,              data.numeroPersonas ?? 1);
     req.input('subtotal',       sql.Decimal(18, 2),   subtotal);
-    req.input('totalImpuestos', sql.Decimal(18, 2),   totalImpuestos);
     req.input('totalCuenta',    sql.Decimal(18, 2),   totalCuenta);
     req.input('notasGenerales', sql.NVarChar,         data.notasGenerales ?? null);
   });
@@ -269,34 +257,34 @@ export async function abrirPedido(
 
   const comandaID = comandaRows[0].ComandaID;
 
-  // 5. Insertar ítems en ComandaDetalle
+  // 5. Insertar ítems — MontoIVA = 0 porque precio ya lo incluye
   for (const item of itemsConPrecio) {
     await query(`
       INSERT INTO modu_rest_ComandaDetalle (
         ComandaID, PedidoID, IdArticulo, NombreArticulo,
-        Cantidad, PrecioVentaHistorico, PorcentajeIVA,
-        MontoIVA, Subtotal, EstadoItem, NotasEspeciales
+        Cantidad, PrecioVentaHistorico,
+        PorcentajeIVA, MontoIVA, MontoDescuento,
+        Subtotal, EstadoItem, NotasEspeciales
       )
       VALUES (
         @comandaID, @pedidoID, @articuloID, @nombreArticulo,
-        @cantidad, @precioVenta, @porcentajeIVA,
-        @montoIVA, @subtotal, 'Pendiente', @notasEspeciales
+        @cantidad, @precioVenta,
+        0, 0, 0,
+        @subtotal, 'Pendiente', @notasEspeciales
       )
     `, (req) => {
-      req.input('comandaID',      sql.UniqueIdentifier, comandaID);
-      req.input('pedidoID',       sql.UniqueIdentifier, pedidoID);
-      req.input('articuloID',     sql.Int,              item.articuloID);
-      req.input('nombreArticulo', sql.NVarChar,         item.nombre);
-      req.input('cantidad',       sql.Decimal(10, 2),   item.cantidad);
-      req.input('precioVenta',    sql.Decimal(18, 2),   item.precioVenta);
-      req.input('porcentajeIVA',  sql.Decimal(5, 2),    item.porcentajeIVA);
-      req.input('montoIVA',       sql.Decimal(18, 2),   item.montoIVA);
-      req.input('subtotal',       sql.Decimal(18, 2),   item.itemSubtotal);
-      req.input('notasEspeciales',sql.NVarChar,         item.notasEspeciales ?? null);
+      req.input('comandaID',       sql.UniqueIdentifier, comandaID);
+      req.input('pedidoID',        sql.UniqueIdentifier, pedidoID);
+      req.input('articuloID',      sql.Int,              item.articuloID);
+      req.input('nombreArticulo',  sql.NVarChar,         item.nombre);
+      req.input('cantidad',        sql.Decimal(10, 2),   item.cantidad);
+      req.input('precioVenta',     sql.Decimal(18, 2),   item.precioVenta);
+      req.input('subtotal',        sql.Decimal(18, 2),   item.itemSubtotal);
+      req.input('notasEspeciales', sql.NVarChar,         item.notasEspeciales ?? null);
     });
   }
 
-  // 6. Cambiar estado de la mesa a Ocupada
+  // 6. Cambiar estado de la mesa
   if (data.mesaID) {
     await cambiarEstadoMesa(data.mesaID, 'Ocupada');
   }
@@ -323,7 +311,7 @@ export async function abrirPedido(
   return pedido;
 }
 
-// ── Agregar ronda ────────────────────────────────────
+// ── Agregar ronda ─────────────────────────────────────
 
 export async function agregarRonda(
   pedidoID: string,
@@ -333,9 +321,8 @@ export async function agregarRonda(
 
   const pedido = await obtenerPedido(pedidoID);
 
-  if (pedido.estadoPedido !== 'Abierto') {
+  if (pedido.estadoPedido !== 'Abierto')
     throw new AppError('No se pueden agregar ítems a un pedido que no está abierto', 409);
-  }
 
   const rondasRows = await query<{ totalRondas: number }>(`
     SELECT COUNT(*) AS totalRondas
@@ -347,19 +334,15 @@ export async function agregarRonda(
 
   const numeroRonda = rondasRows[0].totalRondas + 1;
 
+  // Calcular sin IVA adicional
   let subtotalNuevo = 0;
-  let impuestosNuevo = 0;
 
   const itemsConPrecio = await Promise.all(
     items.map(async (item) => {
-      const art = await obtenerPrecioArticulo(item.articuloID);
-      const montoIVA     = art.precioVenta * item.cantidad * (art.porcentajeIVA / 100);
+      const art          = await obtenerPrecioArticulo(item.articuloID);
       const itemSubtotal = art.precioVenta * item.cantidad;
-
-      subtotalNuevo  += itemSubtotal;
-      impuestosNuevo += montoIVA;
-
-      return { ...item, ...art, montoIVA, itemSubtotal };
+      subtotalNuevo     += itemSubtotal;
+      return { ...item, ...art, itemSubtotal };
     })
   );
 
@@ -378,47 +361,44 @@ export async function agregarRonda(
     await query(`
       INSERT INTO modu_rest_ComandaDetalle (
         ComandaID, PedidoID, IdArticulo, NombreArticulo,
-        Cantidad, PrecioVentaHistorico, PorcentajeIVA,
-        MontoIVA, Subtotal, EstadoItem, NotasEspeciales
+        Cantidad, PrecioVentaHistorico,
+        PorcentajeIVA, MontoIVA, MontoDescuento,
+        Subtotal, EstadoItem, NotasEspeciales
       )
       VALUES (
         @comandaID, @pedidoID, @articuloID, @nombreArticulo,
-        @cantidad, @precioVenta, @porcentajeIVA,
-        @montoIVA, @subtotal, 'Pendiente', @notasEspeciales
+        @cantidad, @precioVenta,
+        0, 0, 0,
+        @subtotal, 'Pendiente', @notasEspeciales
       )
     `, (req) => {
-      req.input('comandaID',      sql.UniqueIdentifier, comandaID);
-      req.input('pedidoID',       sql.UniqueIdentifier, pedidoID);
-      req.input('articuloID',     sql.Int,              item.articuloID);
-      req.input('nombreArticulo', sql.NVarChar,         item.nombre);
-      req.input('cantidad',       sql.Decimal(10, 2),   item.cantidad);
-      req.input('precioVenta',    sql.Decimal(18, 2),   item.precioVenta);
-      req.input('porcentajeIVA',  sql.Decimal(5, 2),    item.porcentajeIVA);
-      req.input('montoIVA',       sql.Decimal(18, 2),   item.montoIVA);
-      req.input('subtotal',       sql.Decimal(18, 2),   item.itemSubtotal);
-      req.input('notasEspeciales',sql.NVarChar,         item.notasEspeciales ?? null);
+      req.input('comandaID',       sql.UniqueIdentifier, comandaID);
+      req.input('pedidoID',        sql.UniqueIdentifier, pedidoID);
+      req.input('articuloID',      sql.Int,              item.articuloID);
+      req.input('nombreArticulo',  sql.NVarChar,         item.nombre);
+      req.input('cantidad',        sql.Decimal(10, 2),   item.cantidad);
+      req.input('precioVenta',     sql.Decimal(18, 2),   item.precioVenta);
+      req.input('subtotal',        sql.Decimal(18, 2),   item.itemSubtotal);
+      req.input('notasEspeciales', sql.NVarChar,         item.notasEspeciales ?? null);
     });
   }
 
-  // Actualizar totales del pedido
+  // Actualizar totales — solo sumar subtotal, sin IVA
   await query(`
     UPDATE modu_rest_Pedidos SET
-      Subtotal       = Subtotal       + @subtotalNuevo,
-      TotalImpuestos = TotalImpuestos + @impuestosNuevo,
-      TotalCuenta    = TotalCuenta    + @subtotalNuevo + @impuestosNuevo
+      Subtotal    = Subtotal    + @subtotalNuevo,
+      TotalCuenta = TotalCuenta + @subtotalNuevo
     WHERE PedidoID = @pedidoID
   `, (req) => {
-    req.input('pedidoID',       sql.UniqueIdentifier, pedidoID);
-    req.input('subtotalNuevo',  sql.Decimal(18, 2),   subtotalNuevo);
-    req.input('impuestosNuevo', sql.Decimal(18, 2),   impuestosNuevo);
+    req.input('pedidoID',      sql.UniqueIdentifier, pedidoID);
+    req.input('subtotalNuevo', sql.Decimal(18, 2),   subtotalNuevo);
   });
 
   const pedidoActualizado = await obtenerPedido(pedidoID);
-
   return { pedido: pedidoActualizado, comandaID, numeroRonda };
 }
 
-// ── Solicitar cuenta ─────────────────────────────────
+// ── Solicitar cuenta ──────────────────────────────────
 
 export async function solicitarCuenta(
   pedidoID: string,
@@ -426,9 +406,8 @@ export async function solicitarCuenta(
 ): Promise<Pedido> {
   const pedido = await obtenerPedido(pedidoID);
 
-  if (pedido.estadoPedido !== 'Abierto') {
+  if (pedido.estadoPedido !== 'Abierto')
     throw new AppError('El pedido no está en estado Abierto', 409);
-  }
 
   await query(`
     UPDATE modu_rest_Pedidos
@@ -445,7 +424,7 @@ export async function solicitarCuenta(
   return obtenerPedido(pedidoID);
 }
 
-// ── Cancelar pedido ──────────────────────────────────
+// ── Cancelar pedido ───────────────────────────────────
 
 export async function cancelarPedido(
   pedidoID: string,
@@ -453,9 +432,8 @@ export async function cancelarPedido(
 ): Promise<void> {
   const pedido = await obtenerPedido(pedidoID);
 
-  if (pedido.estadoPedido === 'Pagado') {
+  if (pedido.estadoPedido === 'Pagado')
     throw new AppError('No se puede cancelar un pedido ya pagado', 409);
-  }
 
   await query(`
     UPDATE modu_rest_Pedidos
@@ -482,7 +460,7 @@ export async function cancelarPedido(
     entidadTipo: 'Pedido',
     entidadID:   pedidoID,
     usuarioID:   usuarioID,
-    payload:     {
+    payload: {
       pedidoID,
       motivo:          'Cancelado',
       mesaAlias:       pedido.mesaAlias,
