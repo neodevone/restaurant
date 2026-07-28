@@ -61,7 +61,7 @@ export async function crearZona(data: { nombre: string; orden?: number }): Promi
     VALUES (@nombre, @orden)
   `, (req) => {
     req.input('nombre', sql.NVarChar, data.nombre);
-    req.input('orden',  sql.Int,      data.orden ?? 99);
+    req.input('orden', sql.Int, data.orden ?? 99);
   });
 
   const zonas = await query<Zona>(`
@@ -79,7 +79,7 @@ export async function toggleZona(zonaID: string, activa: boolean): Promise<void>
   await query(`
     UPDATE modu_rest_Zonas SET Activa = @activa WHERE ZonaID = @zonaID
   `, (req) => {
-    req.input('activa', sql.Bit,              activa);
+    req.input('activa', sql.Bit, activa);
     req.input('zonaID', sql.UniqueIdentifier, zonaID);
   });
 }
@@ -133,7 +133,9 @@ export async function listarMesasConPedido(): Promise<MesaConPedido[]> {
       AND p.EstadoPedido IN ('Abierto', 'Por Pagar')
     LEFT JOIN modu_rest_Usuarios u ON p.MeseroID = u.UsuarioID
     WHERE m.Activa = 1
-    ORDER BY z.Orden, m.Alias
+    ORDER BY z.Orden, z.Nombre,
+    -- Ordenamiento natural por alias
+    LEN(m.Alias), m.Alias
   `);
 }
 
@@ -175,7 +177,7 @@ export async function crearMesa(data: {
       AND Activa = 1
   `, (req) => {
     req.input('zonaID', sql.UniqueIdentifier, data.zonaID);
-    req.input('alias',  sql.NVarChar,         data.alias);
+    req.input('alias', sql.NVarChar, data.alias);
   });
 
   if (existente[0].total > 0) {
@@ -187,11 +189,11 @@ export async function crearMesa(data: {
     OUTPUT INSERTED.MesaID
     VALUES (@zonaID, @alias, @capacidad, @posicionX, @posicionY)
   `, (req) => {
-    req.input('zonaID',    sql.UniqueIdentifier, data.zonaID);
-    req.input('alias',     sql.NVarChar,         data.alias);
-    req.input('capacidad', sql.Int,              data.capacidad  ?? 4);
-    req.input('posicionX', sql.Int,              data.posicionX  ?? 0);
-    req.input('posicionY', sql.Int,              data.posicionY  ?? 0);
+    req.input('zonaID', sql.UniqueIdentifier, data.zonaID);
+    req.input('alias', sql.NVarChar, data.alias);
+    req.input('capacidad', sql.Int, data.capacidad ?? 4);
+    req.input('posicionX', sql.Int, data.posicionX ?? 0);
+    req.input('posicionY', sql.Int, data.posicionY ?? 0);
   });
 
   return obtenerMesa(rows[0].MesaID);
@@ -215,12 +217,12 @@ export async function actualizarMesa(mesaID: string, data: {
       PosicionY = COALESCE(@posicionY, PosicionY)
     WHERE MesaID = @mesaID
   `, (req) => {
-    req.input('mesaID',    sql.UniqueIdentifier, mesaID);
-    req.input('zonaID',    sql.UniqueIdentifier, data.zonaID    ?? null);
-    req.input('alias',     sql.NVarChar,         data.alias     ?? null);
-    req.input('capacidad', sql.Int,              data.capacidad ?? null);
-    req.input('posicionX', sql.Int,              data.posicionX ?? null);
-    req.input('posicionY', sql.Int,              data.posicionY ?? null);
+    req.input('mesaID', sql.UniqueIdentifier, mesaID);
+    req.input('zonaID', sql.UniqueIdentifier, data.zonaID ?? null);
+    req.input('alias', sql.NVarChar, data.alias ?? null);
+    req.input('capacidad', sql.Int, data.capacidad ?? null);
+    req.input('posicionX', sql.Int, data.posicionX ?? null);
+    req.input('posicionY', sql.Int, data.posicionY ?? null);
   });
 
   return obtenerMesa(mesaID);
@@ -235,8 +237,8 @@ export async function cambiarEstadoMesa(
   await query(`
     UPDATE modu_rest_Mesas SET Estado = @estado WHERE MesaID = @mesaID
   `, (req) => {
-    req.input('estado',  sql.NVarChar,         estado);
-    req.input('mesaID',  sql.UniqueIdentifier, mesaID);
+    req.input('estado', sql.NVarChar, estado);
+    req.input('mesaID', sql.UniqueIdentifier, mesaID);
   });
 
   return obtenerMesa(mesaID);
@@ -248,7 +250,7 @@ export async function toggleMesa(mesaID: string, activa: boolean): Promise<void>
   await query(`
     UPDATE modu_rest_Mesas SET Activa = @activa WHERE MesaID = @mesaID
   `, (req) => {
-    req.input('activa', sql.Bit,              activa);
+    req.input('activa', sql.Bit, activa);
     req.input('mesaID', sql.UniqueIdentifier, mesaID);
   });
 }
@@ -264,8 +266,8 @@ export async function actualizarPosicionMesa(
         PosicionY = @posicionY
     WHERE MesaID = @mesaID
   `, (req) => {
-    req.input('mesaID',    sql.UniqueIdentifier, mesaID);
-    req.input('posicionX', sql.Int,              posicionX);
-    req.input('posicionY', sql.Int,              posicionY);
+    req.input('mesaID', sql.UniqueIdentifier, mesaID);
+    req.input('posicionX', sql.Int, posicionX);
+    req.input('posicionY', sql.Int, posicionY);
   });
 }
