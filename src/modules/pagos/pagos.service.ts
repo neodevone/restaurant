@@ -20,11 +20,15 @@ export interface MetadataPago {
   franquicia?:       string;
   terminal?:         string;
 
-  // Crédito / Cortesía / Empleado
+  // Crédito / Fiado / Cortesía / Empleado
   nombreCliente?: string;
   cedula?:        string;
+  celular?:       string;
   autorizadoPor?: string;
   motivo?:        string;
+
+  // Ciclo de vida de la cuenta por cobrar
+  estadoCredito?: 'PENDIENTE' | 'ABONADA' | 'PAGADO';
 }
 
 export interface Pago {
@@ -57,6 +61,16 @@ export interface RegistrarPagoDTO {
   metadataPago?:     MetadataPago;
 }
 
+export interface RegistrarFiadoDTO {
+  pedidoID:       string;
+  metodoID:       string;
+  cedula:         string;
+  celular:        string;
+  nombreCliente?: string;
+  autorizadoPor?: string;
+  motivo?:        string;
+}
+
 export interface PagoResumen {
   totalPagado:        number;
   totalEsperado:      number;
@@ -64,6 +78,10 @@ export interface PagoResumen {
   pagosRegistrados:   Pago[];
   pagadoCompletamente: boolean;
 }
+
+// Estados de pedido en los que todavía se puede recibir dinero.
+// 'Fiado' entra aquí para que los abonos a la deuda usen el mismo flujo.
+const ESTADOS_COBRABLES = ['Abierto', 'Por Pagar', 'Fiado'];
 
 // ── Métodos de pago ───────────────────────────────────
 
@@ -78,10 +96,10 @@ export async function listarMetodosPago() {
     WHERE Activo = 1
     ORDER BY
       CASE Tipo
-        WHEN 'Efectivo'  THEN 1
-        WHEN 'Digital'   THEN 2
-        WHEN 'Tarjeta'   THEN 3
-        WHEN 'Domicilio' THEN 4
+        WHEN 'Efectivo' THEN 1
+        WHEN 'Digital'  THEN 2
+        WHEN 'Tarjeta'  THEN 3
+        WHEN 'Credito'  THEN 4
         ELSE 5
       END,
       Nombre
@@ -187,6 +205,43 @@ export async function resumenPagosPedido(
   };
 }
 
+// ── Helpers de crédito ────────────────────────────────
+
+// Marca la fila de fiado del pedido con el estado indicado.
+// No se toca MontoPagado de esa fila: el dinero de la cobranza
+// entra siempre como una fila nueva, con la fecha del día que pagan.
+async function actualizarEstadoCredito(
+  pedidoID: string,
+  estado: 'ABONADA' | 'PAGADO'
+): Promise<void> {
+  await query(`
+    UPDATE modu_rest_Pagos
+    SET MetadataPago = JSON_MODIFY(MetadataPago, '$.estadoCredito', @estado)
+    WHERE PedidoID = @pedidoID
+      AND Anulado  = 0
+      AND ISJSON(MetadataPago) = 1
+      AND JSON_VALUE(MetadataPago, '$.estadoCredito') IS NOT NULL
+      AND JSON_VALUE(MetadataPago, '$.estadoCredito') <> 'PAGADO'
+  `, (req) => {
+    req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
+    req.input('estado',   sql.NVarChar,         estado);
+  });
+}
+
+async function saldoPendienteDe(
+  pedidoID: string,
+  totalCuenta: number
+): Promise<number> {
+  const rows = await query<{ totalPagado: number }>(`
+    SELECT ISNULL(SUM(MontoPagado), 0) AS totalPagado
+    FROM modu_rest_Pagos
+    WHERE PedidoID = @pedidoID AND Anulado = 0
+  `, (req) => {
+    req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
+  });
+  return totalCuenta - rows[0].totalPagado;
+}
+
 // ── Registrar pago ────────────────────────────────────
 
 export async function registrarPago(
@@ -223,8 +278,10 @@ export async function registrarPago(
 
   const pedido = pedidoRows[0];
 
-  if (!['Abierto', 'Por Pagar'].includes(pedido.estadoPedido))
+  if (!ESTADOS_COBRABLES.includes(pedido.estadoPedido))
     throw new AppError('Este pedido no está disponible para pago', 409);
+
+  const eraFiado = pedido.estadoPedido === 'Fiado';
 
   // 2. Calcular saldo pendiente
   const pagosActuales = await query<{ totalPagado: number }>(`
@@ -297,6 +354,15 @@ export async function registrarPago(
     }
   }
 
+  // 6b. Si el pedido venía de una cuenta por cobrar, mover el estado
+  //     del crédito. La fila del fiado nunca cambia su MontoPagado.
+  if (eraFiado) {
+    await actualizarEstadoCredito(
+      data.pedidoID,
+      pagadoCompletamente ? 'PAGADO' : 'ABONADA'
+    );
+  }
+
   const pago    = await obtenerPago(pagoID);
   const resumen = await resumenPagosPedido(data.pedidoID);
 
@@ -317,10 +383,11 @@ export async function registrarPago(
       vuelto,
       pagadoCompletamente,
       saldoPendiente:     resumen.saldoPendiente,
+      recuperacionCartera: eraFiado,
     },
   });
 
-  if (pagadoCompletamente) {
+  if (pagadoCompletamente && !eraFiado) {
     await registrarEvento({
       tipo:        'MESA_CERRADA',
       entidadTipo: 'Pedido',
@@ -335,6 +402,164 @@ export async function registrarPago(
       },
     });
   }
+
+  return { pago, resumen };
+}
+
+// ── Registrar cuenta por cobrar (fiado) ───────────────
+// El saldo que queda del pedido se convierte en deuda.
+// MontoPagado = 0 para no alterar el recaudo del día.
+// MontoEsperado = valor de la deuda.
+
+export async function registrarCuentaPorCobrar(
+  cajeroID: string,
+  data: RegistrarFiadoDTO
+): Promise<{ pago: Pago; resumen: PagoResumen }> {
+
+  // 1. Verificar pedido
+  const pedidoRows = await query<{
+    pedidoID:     string;
+    mesaID:       string | null;
+    totalCuenta:  number;
+    estadoPedido: string;
+    mesaAlias:    string | null;
+    numeroPedido: number;
+    tipoPedido:   string;
+  }>(`
+    SELECT
+      p.PedidoID      AS pedidoID,
+      p.MesaID        AS mesaID,
+      p.TotalCuenta   AS totalCuenta,
+      p.EstadoPedido  AS estadoPedido,
+      p.NumeroPedido  AS numeroPedido,
+      p.TipoPedido    AS tipoPedido,
+      m.Alias         AS mesaAlias
+    FROM modu_rest_Pedidos p
+    LEFT JOIN modu_rest_Mesas m ON p.MesaID = m.MesaID
+    WHERE p.PedidoID = @pedidoID
+  `, (req) => {
+    req.input('pedidoID', sql.UniqueIdentifier, data.pedidoID);
+  });
+
+  if (pedidoRows.length === 0) throw new AppError('Pedido no encontrado', 404);
+
+  const pedido = pedidoRows[0];
+
+  if (!['Abierto', 'Por Pagar'].includes(pedido.estadoPedido))
+    throw new AppError('Este pedido no está disponible para fiar', 409);
+
+  // 2. Verificar que el método sea de tipo Crédito
+  const metodoRows = await query<{ tipo: string; nombre: string }>(`
+    SELECT Tipo AS tipo, Nombre AS nombre
+    FROM modu_rest_MetodosPago
+    WHERE MetodoID = @metodoID AND Activo = 1
+  `, (req) => {
+    req.input('metodoID', sql.UniqueIdentifier, data.metodoID);
+  });
+
+  if (metodoRows.length === 0)
+    throw new AppError('Método de pago no encontrado o inactivo', 400);
+
+  if (metodoRows[0].tipo !== 'Credito')
+    throw new AppError('El método seleccionado no es una cuenta por cobrar', 400);
+
+  // 3. El saldo que queda es la deuda
+  const deuda = await saldoPendienteDe(data.pedidoID, pedido.totalCuenta);
+
+  if (deuda <= 0)
+    throw new AppError('Este pedido ya está completamente pagado', 409);
+
+  // 4. Metadata del crédito
+  const metadataPago: MetadataPago = {
+    tipoPedido:    pedido.tipoPedido as MetadataPago['tipoPedido'],
+    cedula:        data.cedula,
+    celular:       data.celular,
+    nombreCliente: data.nombreCliente ?? undefined,
+    autorizadoPor: data.autorizadoPor ?? undefined,
+    motivo:        data.motivo ?? undefined,
+    estadoCredito: 'PENDIENTE',
+  };
+
+  // 5. Insertar la fila del fiado
+  const pagoRows = await query<{ PagoID: string }>(`
+    INSERT INTO modu_rest_Pagos (
+      PedidoID, MetodoID, CajeroID,
+      MontoPagado, MontoEsperado, Vuelto, Propina,
+      ReferenciaExterna, MetadataPago
+    )
+    OUTPUT INSERTED.PagoID
+    VALUES (
+      @pedidoID, @metodoID, @cajeroID,
+      0, @deuda, 0, 0,
+      @referenciaExterna, @metadataPago
+    )
+  `, (req) => {
+    req.input('pedidoID',          sql.UniqueIdentifier, data.pedidoID);
+    req.input('metodoID',          sql.UniqueIdentifier, data.metodoID);
+    req.input('cajeroID',          sql.UniqueIdentifier, cajeroID);
+    req.input('deuda',             sql.Decimal(18, 2),   deuda);
+    req.input('referenciaExterna', sql.NVarChar,         data.cedula);
+    req.input('metadataPago',      sql.NVarChar,         JSON.stringify(metadataPago));
+  });
+
+  const pagoID = pagoRows[0].PagoID;
+
+  // 6. Cerrar el pedido y liberar la mesa de forma explícita.
+  //    No se deduce de la suma de pagos porque MontoPagado es 0.
+  await query(`
+    UPDATE modu_rest_Pedidos SET
+      EstadoPedido = 'Fiado',
+      FechaCierre  = SYSUTCDATETIME()
+    WHERE PedidoID = @pedidoID
+  `, (req) => {
+    req.input('pedidoID', sql.UniqueIdentifier, data.pedidoID);
+  });
+
+  if (pedido.mesaID) {
+    await cambiarEstadoMesa(pedido.mesaID, 'Libre');
+  }
+
+  const pago    = await obtenerPago(pagoID);
+  const resumen = await resumenPagosPedido(data.pedidoID);
+
+  // 7. Eventos
+  await registrarEvento({
+    tipo:        'PAGO_RECIBIDO',
+    entidadTipo: 'Pago',
+    entidadID:   pagoID,
+    usuarioID:   cajeroID,
+    payload: {
+      pagoID,
+      pedidoID:      data.pedidoID,
+      numeroPedido:  pedido.numeroPedido,
+      mesaAlias:     pedido.mesaAlias,
+      tipoPedido:    pedido.tipoPedido,
+      montoPagado:   0,
+      metodo:        pago.metodoNombre,
+      esFiado:       true,
+      deuda,
+      cliente:       data.nombreCliente ?? data.cedula,
+      cedula:        data.cedula,
+      celular:       data.celular,
+      autorizadoPor: data.autorizadoPor ?? null,
+    },
+  });
+
+  await registrarEvento({
+    tipo:        'MESA_CERRADA',
+    entidadTipo: 'Pedido',
+    entidadID:   data.pedidoID,
+    usuarioID:   cajeroID,
+    payload: {
+      pedidoID:        data.pedidoID,
+      numeroPedido:    pedido.numeroPedido,
+      mesaAlias:       pedido.mesaAlias,
+      totalCuenta:     pedido.totalCuenta,
+      motivo:          'Cuenta por cobrar',
+      deuda,
+      nuevoEstadoMesa: 'Libre',
+    },
+  });
 
   return { pago, resumen };
 }
@@ -361,13 +586,67 @@ export async function anularPago(
     req.input('motivo',  sql.NVarChar,         motivo);
   });
 
+  // Un pedido cerrado (pagado o fiado) vuelve a quedar cobrable
   await query(`
     UPDATE modu_rest_Pedidos SET
       EstadoPedido = 'Por Pagar',
       FechaCierre  = NULL
-    WHERE PedidoID = @pedidoID AND EstadoPedido = 'Pagado'
+    WHERE PedidoID = @pedidoID AND EstadoPedido IN ('Pagado', 'Fiado')
   `, (req) => {
     req.input('pedidoID', sql.UniqueIdentifier, pago.pedidoID);
+  });
+}
+
+// ── Listar cuentas por cobrar ─────────────────────────
+// Base para el formulario de cartera. El saldo de la deuda es
+// MontoEsperado de la fila fiado menos lo abonado después.
+
+export async function listarCuentasPorCobrar(filtros: {
+  estado?: 'PENDIENTE' | 'ABONADA' | 'PAGADO';
+  cedula?: string;
+}) {
+  return query(`
+    SELECT
+      f.PagoID          AS pagoID,
+      f.PedidoID        AS pedidoID,
+      pe.NumeroPedido   AS numeroPedido,
+      pe.TotalCuenta    AS totalCuenta,
+      f.MontoEsperado   AS deudaOriginal,
+      f.FechaTransaccion AS fechaCredito,
+      JSON_VALUE(f.MetadataPago, '$.cedula')        AS cedula,
+      JSON_VALUE(f.MetadataPago, '$.celular')       AS celular,
+      JSON_VALUE(f.MetadataPago, '$.nombreCliente') AS nombreCliente,
+      JSON_VALUE(f.MetadataPago, '$.autorizadoPor') AS autorizadoPor,
+      JSON_VALUE(f.MetadataPago, '$.estadoCredito') AS estadoCredito,
+      ISNULL((
+        SELECT SUM(ab.MontoPagado)
+        FROM modu_rest_Pagos ab
+        WHERE ab.PedidoID = f.PedidoID
+          AND ab.Anulado  = 0
+          AND ab.FechaTransaccion > f.FechaTransaccion
+      ), 0)             AS abonado,
+      f.MontoEsperado - ISNULL((
+        SELECT SUM(ab.MontoPagado)
+        FROM modu_rest_Pagos ab
+        WHERE ab.PedidoID = f.PedidoID
+          AND ab.Anulado  = 0
+          AND ab.FechaTransaccion > f.FechaTransaccion
+      ), 0)             AS saldoDeuda,
+      u.Nombre + ' ' + u.Apellido AS cajero
+    FROM modu_rest_Pagos f
+    JOIN modu_rest_Pedidos     pe ON f.PedidoID = pe.PedidoID
+    JOIN modu_rest_MetodosPago mp ON f.MetodoID = mp.MetodoID
+    JOIN modu_rest_Usuarios    u  ON f.CajeroID = u.UsuarioID
+    WHERE
+      mp.Tipo    = 'Credito'
+      AND f.Anulado = 0
+      AND ISJSON(f.MetadataPago) = 1
+      AND (@estado IS NULL OR JSON_VALUE(f.MetadataPago, '$.estadoCredito') = @estado)
+      AND (@cedula IS NULL OR JSON_VALUE(f.MetadataPago, '$.cedula')        = @cedula)
+    ORDER BY f.FechaTransaccion DESC
+  `, (req) => {
+    req.input('estado', sql.NVarChar, filtros.estado ?? null);
+    req.input('cedula', sql.NVarChar, filtros.cedula ?? null);
   });
 }
 

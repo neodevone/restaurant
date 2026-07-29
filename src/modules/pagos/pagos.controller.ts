@@ -5,7 +5,8 @@ import Joi from 'joi';
 import { respond } from '../../shared/response.helper';
 import {
   listarMetodosPago, obtenerPago, resumenPagosPedido,
-  registrarPago, anularPago
+  registrarPago, registrarCuentaPorCobrar, anularPago,
+  listarCuentasPorCobrar
 } from './pagos.service';
 
 // ── Schemas ───────────────────────────────────────────
@@ -19,11 +20,13 @@ const metadataSchema = Joi.object({
   codigoAprobacion: Joi.string().max(50).allow('', null).optional(),
   franquicia:       Joi.string().max(50).allow('', null).optional(),
   terminal:         Joi.string().max(50).allow('', null).optional(),
-  // Crédito / Cortesía / Empleado
+  // Crédito / Fiado / Cortesía / Empleado
   nombreCliente:    Joi.string().max(150).allow('', null).optional(),
   cedula:           Joi.string().max(20).allow('', null).optional(),
+  celular:          Joi.string().max(20).allow('', null).optional(),
   autorizadoPor:    Joi.string().max(100).allow('', null).optional(),
   motivo:           Joi.string().max(300).allow('', null).optional(),
+  estadoCredito:    Joi.string().valid('PENDIENTE', 'ABONADA', 'PAGADO').optional(),
 }).optional();
 
 const pagoSchema = Joi.object({
@@ -40,6 +43,26 @@ const pagoSchema = Joi.object({
   propina:           Joi.number().min(0).optional(),
   referenciaExterna: Joi.string().max(100).allow('', null).optional(),
   metadataPago:      metadataSchema,
+});
+
+const fiadoSchema = Joi.object({
+  pedidoID: Joi.string().uuid().required().messages({
+    'any.required': 'El pedidoID es requerido',
+  }),
+  metodoID: Joi.string().uuid().required().messages({
+    'any.required': 'El método de cuenta por cobrar es requerido',
+  }),
+  cedula: Joi.string().min(4).max(20).required().messages({
+    'any.required':  'La cédula del cliente es requerida',
+    'string.min':    'La cédula debe tener al menos 4 dígitos',
+  }),
+  celular: Joi.string().min(7).max(20).required().messages({
+    'any.required':  'El celular del cliente es requerido',
+    'string.min':    'El celular debe tener al menos 7 dígitos',
+  }),
+  nombreCliente: Joi.string().max(150).allow('', null).optional(),
+  autorizadoPor: Joi.string().max(100).allow('', null).optional(),
+  motivo:        Joi.string().max(300).allow('', null).optional(),
 });
 
 const anularSchema = Joi.object({
@@ -78,17 +101,6 @@ export async function getResumenPedido(
   } catch (err) { next(err); }
 }
 
-/*
-export async function getPagosTurno(
-  req: Request, res: Response, next: NextFunction
-) {
-  try {
-    const data = await listarPagosTurno(req.params.turnoID as string);
-    respond.ok(res, data);
-  } catch (err) { next(err); }
-}
-  */
-
 export async function postRegistrarPago(
   req: Request, res: Response, next: NextFunction
 ) {
@@ -103,6 +115,35 @@ export async function postRegistrarPago(
       : `Pago parcial. Saldo pendiente: $${result.resumen.saldoPendiente.toLocaleString()}`;
 
     respond.created(res, result, mensaje);
+  } catch (err) { next(err); }
+}
+
+export async function postRegistrarFiado(
+  req: Request, res: Response, next: NextFunction
+) {
+  try {
+    const { error, value } = fiadoSchema.validate(req.body);
+    if (error) { respond.badRequest(res, error.details[0].message); return; }
+
+    const result = await registrarCuentaPorCobrar(req.usuario!.usuarioID, value);
+
+    respond.created(
+      res,
+      result,
+      `Cuenta por cobrar registrada por $${result.pago.montoEsperado.toLocaleString()}`
+    );
+  } catch (err) { next(err); }
+}
+
+export async function getCuentasPorCobrar(
+  req: Request, res: Response, next: NextFunction
+) {
+  try {
+    const data = await listarCuentasPorCobrar({
+      estado: req.query.estado as 'PENDIENTE' | 'ABONADA' | 'PAGADO' | undefined,
+      cedula: req.query.cedula as string | undefined,
+    });
+    respond.ok(res, data);
   } catch (err) { next(err); }
 }
 
