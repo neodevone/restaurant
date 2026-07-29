@@ -349,7 +349,9 @@ export async function registrarPago(
       req.input('pedidoID', sql.UniqueIdentifier, data.pedidoID);
     });
 
-    if (pedido.mesaID) {
+    // Solo se libera la mesa si el pedido se cierra ahora. Si venía de un
+    // fiado, la mesa ya se liberó ese día y hoy puede estar ocupada por otro.
+    if (pedido.mesaID && !eraFiado) {
       await cambiarEstadoMesa(pedido.mesaID, 'Libre');
     }
   }
@@ -619,14 +621,14 @@ export async function listarCuentasPorCobrar(filtros: {
       JSON_VALUE(f.MetadataPago, '$.autorizadoPor') AS autorizadoPor,
       JSON_VALUE(f.MetadataPago, '$.estadoCredito') AS estadoCredito,
       ISNULL((
-        SELECT SUM(ab.MontoPagado)
+        SELECT SUM(ab.MontoPagado - ab.Vuelto)
         FROM modu_rest_Pagos ab
         WHERE ab.PedidoID = f.PedidoID
           AND ab.Anulado  = 0
           AND ab.FechaTransaccion > f.FechaTransaccion
       ), 0)             AS abonado,
       f.MontoEsperado - ISNULL((
-        SELECT SUM(ab.MontoPagado)
+        SELECT SUM(ab.MontoPagado - ab.Vuelto)
         FROM modu_rest_Pagos ab
         WHERE ab.PedidoID = f.PedidoID
           AND ab.Anulado  = 0
