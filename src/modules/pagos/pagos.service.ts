@@ -7,43 +7,65 @@ import { cambiarEstadoMesa } from '../mesas/mesas.service';
 
 // ── Interfaces ───────────────────────────────────────
 
+export interface MetadataPago {
+  // Tipo de pedido
+  tipoPedido?: 'Mesa' | 'Para Llevar' | 'Domicilio';
+
+  // Digital / Transferencia
+  referencia?:   string;
+  confirmado?:   boolean;
+
+  // Datáfono
+  codigoAprobacion?: string;
+  franquicia?:       string;
+  terminal?:         string;
+
+  // Crédito / Cortesía / Empleado
+  nombreCliente?: string;
+  cedula?:        string;
+  autorizadoPor?: string;
+  motivo?:        string;
+}
+
 export interface Pago {
-  pagoID: string;
-  pedidoID: string;
-  numeroPedido: number;
-  mesaAlias: string | null;
-  metodoID: string;
-  metodoNombre: string;
-  metodoTipo: string;
-  cajeroID: string;
-  cajero: string;
-  montoPagado: number;
-  montoEsperado: number;
-  vuelto: number;
-  propina: number;
+  pagoID:            string;
+  pedidoID:          string;
+  numeroPedido:      number;
+  mesaAlias:         string | null;
+  metodoID:          string;
+  metodoNombre:      string;
+  metodoTipo:        string;
+  cajeroID:          string;
+  cajero:            string;
+  montoPagado:       number;
+  montoEsperado:     number;
+  vuelto:            number;
+  propina:           number;
   referenciaExterna: string | null;
-  fechaTransaccion: string;
-  anulado: boolean;
-  motivoBaja: string | null;
+  metadataPago:      string | null;
+  fechaTransaccion:  string;
+  anulado:           boolean;
+  motivoBaja:        string | null;
 }
 
 export interface RegistrarPagoDTO {
-  pedidoID: string;
-  metodoID: string;
-  montoPagado: number;
-  propina?: number;
+  pedidoID:          string;
+  metodoID:          string;
+  montoPagado:       number;
+  propina?:          number;
   referenciaExterna?: string;
+  metadataPago?:     MetadataPago;
 }
 
 export interface PagoResumen {
-  totalPagado: number;
-  totalEsperado: number;
-  saldoPendiente: number;
-  pagosRegistrados: Pago[];
+  totalPagado:        number;
+  totalEsperado:      number;
+  saldoPendiente:     number;
+  pagosRegistrados:   Pago[];
   pagadoCompletamente: boolean;
 }
 
-// ── Métodos de pago ──────────────────────────────────
+// ── Métodos de pago ───────────────────────────────────
 
 export async function listarMetodosPago() {
   return query(`
@@ -54,11 +76,19 @@ export async function listarMetodosPago() {
       Activo   AS activo
     FROM modu_rest_MetodosPago
     WHERE Activo = 1
-    ORDER BY Nombre
+    ORDER BY
+      CASE Tipo
+        WHEN 'Efectivo'  THEN 1
+        WHEN 'Digital'   THEN 2
+        WHEN 'Tarjeta'   THEN 3
+        WHEN 'Domicilio' THEN 4
+        ELSE 5
+      END,
+      Nombre
   `);
 }
 
-// ── Obtener pago ─────────────────────────────────────
+// ── Obtener pago ──────────────────────────────────────
 
 export async function obtenerPago(pagoID: string): Promise<Pago> {
   const rows = await query<Pago>(`
@@ -77,6 +107,7 @@ export async function obtenerPago(pagoID: string): Promise<Pago> {
       p.Vuelto             AS vuelto,
       p.Propina            AS propina,
       p.ReferenciaExterna  AS referenciaExterna,
+      p.MetadataPago       AS metadataPago,
       p.FechaTransaccion   AS fechaTransaccion,
       p.Anulado            AS anulado,
       p.MotivoBaja         AS motivoBaja
@@ -94,13 +125,13 @@ export async function obtenerPago(pagoID: string): Promise<Pago> {
   return rows[0];
 }
 
-// ── Resumen de pagos de un pedido ────────────────────
+// ── Resumen de pagos de un pedido ─────────────────────
 
 export async function resumenPagosPedido(
   pedidoID: string
 ): Promise<PagoResumen> {
   const pedidoRows = await query<{
-    totalCuenta: number;
+    totalCuenta:  number;
     estadoPedido: string;
   }>(`
     SELECT TotalCuenta AS totalCuenta, EstadoPedido AS estadoPedido
@@ -129,6 +160,7 @@ export async function resumenPagosPedido(
       p.Vuelto             AS vuelto,
       p.Propina            AS propina,
       p.ReferenciaExterna  AS referenciaExterna,
+      p.MetadataPago       AS metadataPago,
       p.FechaTransaccion   AS fechaTransaccion,
       p.Anulado            AS anulado,
       p.MotivoBaja         AS motivoBaja
@@ -150,12 +182,12 @@ export async function resumenPagosPedido(
     totalPagado,
     totalEsperado,
     saldoPendiente,
-    pagosRegistrados: pagos,
+    pagosRegistrados:   pagos,
     pagadoCompletamente: saldoPendiente === 0,
   };
 }
 
-// ── Registrar pago ───────────────────────────────────
+// ── Registrar pago ────────────────────────────────────
 
 export async function registrarPago(
   cajeroID: string,
@@ -164,12 +196,13 @@ export async function registrarPago(
 
   // 1. Verificar pedido
   const pedidoRows = await query<{
-    pedidoID: string;
-    mesaID: string | null;
-    totalCuenta: number;
+    pedidoID:     string;
+    mesaID:       string | null;
+    totalCuenta:  number;
     estadoPedido: string;
-    mesaAlias: string | null;
+    mesaAlias:    string | null;
     numeroPedido: number;
+    tipoPedido:   string;
   }>(`
     SELECT
       p.PedidoID      AS pedidoID,
@@ -177,6 +210,7 @@ export async function registrarPago(
       p.TotalCuenta   AS totalCuenta,
       p.EstadoPedido  AS estadoPedido,
       p.NumeroPedido  AS numeroPedido,
+      p.TipoPedido    AS tipoPedido,
       m.Alias         AS mesaAlias
     FROM modu_rest_Pedidos p
     LEFT JOIN modu_rest_Mesas m ON p.MesaID = m.MesaID
@@ -189,9 +223,8 @@ export async function registrarPago(
 
   const pedido = pedidoRows[0];
 
-  if (!['Abierto', 'Por Pagar'].includes(pedido.estadoPedido)) {
+  if (!['Abierto', 'Por Pagar'].includes(pedido.estadoPedido))
     throw new AppError('Este pedido no está disponible para pago', 409);
-  }
 
   // 2. Calcular saldo pendiente
   const pagosActuales = await query<{ totalPagado: number }>(`
@@ -205,26 +238,31 @@ export async function registrarPago(
   const totalPagadoAntes = pagosActuales[0].totalPagado;
   const saldoPendiente   = pedido.totalCuenta - totalPagadoAntes;
 
-  if (saldoPendiente <= 0) {
+  if (saldoPendiente <= 0)
     throw new AppError('Este pedido ya está completamente pagado', 409);
-  }
 
   // 3. Calcular vuelto
   const montoEsperado = Math.min(data.montoPagado, saldoPendiente);
   const vuelto        = Math.max(0, data.montoPagado - saldoPendiente);
 
-  // 4. Insertar pago — sin TurnoID
+  // 4. Construir metadataPago — incluye tipoPedido del pedido
+  const metadataPago: MetadataPago = {
+    tipoPedido: pedido.tipoPedido as MetadataPago['tipoPedido'],
+    ...data.metadataPago,
+  };
+
+  // 5. Insertar pago
   const pagoRows = await query<{ PagoID: string }>(`
     INSERT INTO modu_rest_Pagos (
       PedidoID, MetodoID, CajeroID,
       MontoPagado, MontoEsperado, Vuelto, Propina,
-      ReferenciaExterna
+      ReferenciaExterna, MetadataPago
     )
     OUTPUT INSERTED.PagoID
     VALUES (
       @pedidoID, @metodoID, @cajeroID,
       @montoPagado, @montoEsperado, @vuelto, @propina,
-      @referenciaExterna
+      @referenciaExterna, @metadataPago
     )
   `, (req) => {
     req.input('pedidoID',          sql.UniqueIdentifier, data.pedidoID);
@@ -235,11 +273,12 @@ export async function registrarPago(
     req.input('vuelto',            sql.Decimal(18, 2),   vuelto);
     req.input('propina',           sql.Decimal(18, 2),   data.propina ?? 0);
     req.input('referenciaExterna', sql.NVarChar,         data.referenciaExterna ?? null);
+    req.input('metadataPago',      sql.NVarChar,         JSON.stringify(metadataPago));
   });
 
   const pagoID = pagoRows[0].PagoID;
 
-  // 5. Verificar si quedó completamente pagado
+  // 6. Verificar si quedó completamente pagado
   const totalPagadoDespues  = totalPagadoAntes + data.montoPagado;
   const pagadoCompletamente = totalPagadoDespues >= pedido.totalCuenta;
 
@@ -261,7 +300,7 @@ export async function registrarPago(
   const pago    = await obtenerPago(pagoID);
   const resumen = await resumenPagosPedido(data.pedidoID);
 
-  // 6. Emitir eventos
+  // 7. Eventos
   await registrarEvento({
     tipo:        'PAGO_RECIBIDO',
     entidadTipo: 'Pago',
@@ -269,14 +308,15 @@ export async function registrarPago(
     usuarioID:   cajeroID,
     payload: {
       pagoID,
-      pedidoID:         data.pedidoID,
-      numeroPedido:     pedido.numeroPedido,
-      mesaAlias:        pedido.mesaAlias,
-      montoPagado:      data.montoPagado,
-      metodo:           pago.metodoNombre,
+      pedidoID:           data.pedidoID,
+      numeroPedido:       pedido.numeroPedido,
+      mesaAlias:          pedido.mesaAlias,
+      tipoPedido:         pedido.tipoPedido,
+      montoPagado:        data.montoPagado,
+      metodo:             pago.metodoNombre,
       vuelto,
       pagadoCompletamente,
-      saldoPendiente:   resumen.saldoPendiente,
+      saldoPendiente:     resumen.saldoPendiente,
     },
   });
 
@@ -299,18 +339,17 @@ export async function registrarPago(
   return { pago, resumen };
 }
 
-// ── Anular pago ──────────────────────────────────────
+// ── Anular pago ───────────────────────────────────────
 
 export async function anularPago(
-  pagoID: string,
+  pagoID:    string,
   usuarioID: string,
-  motivo: string
+  motivo:    string
 ): Promise<void> {
   const pago = await obtenerPago(pagoID);
 
-  if (pago.anulado) {
+  if (pago.anulado)
     throw new AppError('Este pago ya fue anulado anteriormente', 409);
-  }
 
   await query(`
     UPDATE modu_rest_Pagos SET
@@ -332,7 +371,7 @@ export async function anularPago(
   });
 }
 
-// ── Listar pagos por fecha ───────────────────────────
+// ── Listar pagos por fecha ────────────────────────────
 
 export async function listarPagosPorFecha(
   desde: string,
@@ -354,6 +393,7 @@ export async function listarPagosPorFecha(
       p.Vuelto             AS vuelto,
       p.Propina            AS propina,
       p.ReferenciaExterna  AS referenciaExterna,
+      p.MetadataPago       AS metadataPago,
       p.FechaTransaccion   AS fechaTransaccion,
       p.Anulado            AS anulado,
       p.MotivoBaja         AS motivoBaja

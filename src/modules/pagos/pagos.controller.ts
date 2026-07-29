@@ -5,8 +5,26 @@ import Joi from 'joi';
 import { respond } from '../../shared/response.helper';
 import {
   listarMetodosPago, obtenerPago, resumenPagosPedido,
-  registrarPago, anularPago, listarPagosTurno
+  registrarPago, anularPago
 } from './pagos.service';
+
+// ── Schemas ───────────────────────────────────────────
+
+const metadataSchema = Joi.object({
+  tipoPedido:       Joi.string().valid('Mesa', 'Para Llevar', 'Domicilio').optional(),
+  // Digital / Transferencia
+  referencia:       Joi.string().max(100).allow('', null).optional(),
+  confirmado:       Joi.boolean().optional(),
+  // Datáfono
+  codigoAprobacion: Joi.string().max(50).allow('', null).optional(),
+  franquicia:       Joi.string().max(50).allow('', null).optional(),
+  terminal:         Joi.string().max(50).allow('', null).optional(),
+  // Crédito / Cortesía / Empleado
+  nombreCliente:    Joi.string().max(150).allow('', null).optional(),
+  cedula:           Joi.string().max(20).allow('', null).optional(),
+  autorizadoPor:    Joi.string().max(100).allow('', null).optional(),
+  motivo:           Joi.string().max(300).allow('', null).optional(),
+}).optional();
 
 const pagoSchema = Joi.object({
   pedidoID:          Joi.string().uuid().required().messages({
@@ -20,7 +38,8 @@ const pagoSchema = Joi.object({
     'number.positive': 'El monto debe ser mayor a 0',
   }),
   propina:           Joi.number().min(0).optional(),
-  referenciaExterna: Joi.string().max(100).optional(),
+  referenciaExterna: Joi.string().max(100).allow('', null).optional(),
+  metadataPago:      metadataSchema,
 });
 
 const anularSchema = Joi.object({
@@ -29,6 +48,8 @@ const anularSchema = Joi.object({
     'string.min':   'El motivo debe tener al menos 5 caracteres',
   }),
 });
+
+// ── Controllers ───────────────────────────────────────
 
 export async function getMetodosPago(
   req: Request, res: Response, next: NextFunction
@@ -57,6 +78,7 @@ export async function getResumenPedido(
   } catch (err) { next(err); }
 }
 
+/*
 export async function getPagosTurno(
   req: Request, res: Response, next: NextFunction
 ) {
@@ -65,6 +87,7 @@ export async function getPagosTurno(
     respond.ok(res, data);
   } catch (err) { next(err); }
 }
+  */
 
 export async function postRegistrarPago(
   req: Request, res: Response, next: NextFunction

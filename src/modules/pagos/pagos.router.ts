@@ -5,7 +5,7 @@ import { authMiddleware } from '../../middlewares/auth.middleware';
 import { requireAdmin, requireRol } from '../../middlewares/rol.middleware';
 import {
   getMetodosPago, getPago, getResumenPedido,
-  getPagosTurno, postRegistrarPago, postAnularPago
+  postRegistrarPago, postAnularPago
 } from './pagos.controller';
 
 export const pagosRouter = Router();
@@ -24,11 +24,13 @@ pagosRouter.get('/pedido/:pedidoID',
   getResumenPedido
 );
 
+/*
 // Pagos de un turno — para el reporte de cierre
 pagosRouter.get('/turno/:turnoID',
   requireRol('Administrador', 'Cajero'),
   getPagosTurno
 );
+*/
 
 pagosRouter.get('/:id',
   requireRol('Administrador', 'Cajero'),
