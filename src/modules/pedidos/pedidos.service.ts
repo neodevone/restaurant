@@ -1,4 +1,10 @@
 // src/modules/pedidos/pedidos.service.ts
+//
+// AÑADIDO en esta versión:
+//   · cancelarItemPedido()  — quita un artículo sin borrarlo
+//   · obtenerDetallePedido() ahora excluye los cancelados
+//   · recalcularTotales()   — reconstruye Subtotal/TotalCuenta del detalle
+// El resto del archivo queda igual.
 
 import { query, sql } from '../../config/database';
 import { AppError } from '../../middlewares/error.middleware';
@@ -43,6 +49,9 @@ export interface AbrirPedidoDTO {
   items:           ItemPedido[];
 }
 
+// Estados en los que todavía se puede modificar el contenido del pedido
+const ESTADOS_EDITABLES = ['Abierto', 'Por Pagar'];
+
 // ── Helpers ───────────────────────────────────────────
 
 async function siguienteNumeroPedido(): Promise<number> {
@@ -76,6 +85,31 @@ async function obtenerPrecioArticulo(articuloID: number): Promise<{
     throw new AppError(`El artículo ${articuloID} no existe o está inactivo`, 400);
 
   return rows[0];
+}
+
+/**
+ * Reconstruye Subtotal y TotalCuenta sumando el detalle vigente.
+ * Se recalcula en vez de restar para que un error previo no se acumule.
+ */
+async function recalcularTotales(pedidoID: string): Promise<number> {
+  const rows = await query<{ totalCuenta: number }>(`
+    UPDATE p
+    SET p.Subtotal    = ISNULL(t.suma, 0),
+        p.TotalCuenta = ISNULL(t.suma, 0) - ISNULL(p.TotalDescuento, 0)
+    OUTPUT INSERTED.TotalCuenta AS totalCuenta
+    FROM modu_rest_Pedidos p
+    OUTER APPLY (
+      SELECT SUM(cd.Subtotal) AS suma
+      FROM modu_rest_ComandaDetalle cd
+      WHERE cd.PedidoID = p.PedidoID
+        AND cd.EstadoItem <> 'Cancelado'
+    ) t
+    WHERE p.PedidoID = @pedidoID
+  `, (req) => {
+    req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
+  });
+
+  return rows[0]?.totalCuenta ?? 0;
 }
 
 // ── Obtener pedido ────────────────────────────────────
@@ -114,6 +148,10 @@ export async function obtenerPedido(pedidoID: string): Promise<Pedido> {
 }
 
 // ── Detalle del pedido ────────────────────────────────
+// Excluye los artículos cancelados: esta consulta alimenta la
+// pantalla de cobro y la app, donde un ítem quitado no debe sumar.
+// El histórico completo, con los cancelados, se ve en el módulo
+// de informes (GET /reportes/pedidos/:id).
 
 export async function obtenerDetallePedido(pedidoID: string) {
   return query(`
@@ -130,6 +168,7 @@ export async function obtenerDetallePedido(pedidoID: string) {
       cd.HoraPedido           AS horaPedido
     FROM modu_rest_ComandaDetalle cd
     WHERE cd.PedidoID = @pedidoID
+      AND cd.EstadoItem <> 'Cancelado'
     ORDER BY cd.HoraPedido
   `, (req) => {
     req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
@@ -396,6 +435,163 @@ export async function agregarRonda(
 
   const pedidoActualizado = await obtenerPedido(pedidoID);
   return { pedido: pedidoActualizado, comandaID, numeroRonda };
+}
+
+// ── Cancelar un artículo del pedido ──────────────────
+//
+// No se borra la fila: se marca como Cancelada y queda con el
+// usuario que la quitó, el motivo y la hora. Eso es lo que
+// permite auditar después y lo que desincentiva el mal uso.
+//
+// Reglas:
+//   · Solo en pedidos Abierto o Por Pagar. Uno cerrado no se toca.
+//   · No se puede dejar el total por debajo de lo ya pagado.
+//   · El total del pedido se recalcula de inmediato.
+
+export interface CancelarItemDTO {
+  motivo: string;
+}
+
+export async function cancelarItemPedido(
+  pedidoID:  string,
+  detalleID: string,
+  usuarioID: string,
+  motivo:    string
+): Promise<{
+  pedido: Pedido;
+  articulo: string;
+  montoRetirado: number;
+  itemsRestantes: number;
+}> {
+
+  // 1. El pedido debe ser modificable
+  const pedidoRows = await query<{
+    estadoPedido: string;
+    totalCuenta:  number;
+    numeroPedido: number;
+    mesaAlias:    string | null;
+  }>(`
+    SELECT
+      p.EstadoPedido AS estadoPedido,
+      p.TotalCuenta  AS totalCuenta,
+      p.NumeroPedido AS numeroPedido,
+      m.Alias        AS mesaAlias
+    FROM modu_rest_Pedidos p
+    LEFT JOIN modu_rest_Mesas m ON p.MesaID = m.MesaID
+    WHERE p.PedidoID = @pedidoID
+  `, (req) => {
+    req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
+  });
+
+  if (pedidoRows.length === 0) throw new AppError('Pedido no encontrado', 404);
+
+  const pedidoActual = pedidoRows[0];
+
+  if (!ESTADOS_EDITABLES.includes(pedidoActual.estadoPedido))
+    throw new AppError(
+      `No se puede modificar un pedido en estado ${pedidoActual.estadoPedido}`, 409);
+
+  // 2. El artículo debe existir, pertenecer al pedido y no estar cancelado
+  const itemRows = await query<{
+    articulo: string;
+    subtotal: number;
+    estadoItem: string;
+  }>(`
+    SELECT
+      cd.NombreArticulo AS articulo,
+      cd.Subtotal       AS subtotal,
+      cd.EstadoItem     AS estadoItem
+    FROM modu_rest_ComandaDetalle cd
+    WHERE cd.DetalleID = @detalleID AND cd.PedidoID = @pedidoID
+  `, (req) => {
+    req.input('detalleID', sql.UniqueIdentifier, detalleID);
+    req.input('pedidoID',  sql.UniqueIdentifier, pedidoID);
+  });
+
+  if (itemRows.length === 0)
+    throw new AppError('El artículo no pertenece a este pedido', 404);
+
+  const item = itemRows[0];
+
+  if (item.estadoItem === 'Cancelado')
+    throw new AppError('Este artículo ya estaba cancelado', 409);
+
+  // 3. No dejar el total por debajo de lo ya cobrado
+  const pagos = await query<{ pagado: number }>(`
+    SELECT ISNULL(SUM(pa.MontoPagado - pa.Vuelto), 0) AS pagado
+    FROM modu_rest_Pagos pa
+    WHERE pa.PedidoID = @pedidoID AND pa.Anulado = 0
+  `, (req) => {
+    req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
+  });
+
+  const yaPagado  = pagos[0].pagado;
+  const nuevoTotal = pedidoActual.totalCuenta - item.subtotal;
+
+  if (nuevoTotal < yaPagado) {
+    throw new AppError(
+      `No se puede quitar este artículo: el pedido quedaría en ` +
+      `$${nuevoTotal.toLocaleString()} y ya se han cobrado ` +
+      `$${yaPagado.toLocaleString()}. Anula primero el pago.`,
+      409);
+  }
+
+  // 4. Marcar como cancelado dejando el rastro
+  await query(`
+    UPDATE modu_rest_ComandaDetalle SET
+      EstadoItem        = 'Cancelado',
+      MotivoCancelacion = @motivo,
+      CanceladoPor      = @usuarioID,
+      FechaCancelacion  = SYSUTCDATETIME()
+    WHERE DetalleID = @detalleID
+  `, (req) => {
+    req.input('detalleID', sql.UniqueIdentifier, detalleID);
+    req.input('usuarioID', sql.UniqueIdentifier, usuarioID);
+    req.input('motivo',    sql.NVarChar,         motivo);
+  });
+
+  // 5. Recalcular el total del pedido
+  await recalcularTotales(pedidoID);
+
+  // 6. Cuántos artículos quedan vigentes
+  const restantes = await query<{ total: number }>(`
+    SELECT COUNT(*) AS total
+    FROM modu_rest_ComandaDetalle
+    WHERE PedidoID = @pedidoID AND EstadoItem <> 'Cancelado'
+  `, (req) => {
+    req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
+  });
+
+  const pedido = await obtenerPedido(pedidoID);
+
+  return {
+    pedido,
+    articulo:       item.articulo,
+    montoRetirado:  item.subtotal,
+    itemsRestantes: restantes[0].total,
+  };
+}
+
+// ── Artículos cancelados de un pedido ────────────────
+// Para mostrarlos tachados donde haga falta.
+
+export async function itemsCanceladosPedido(pedidoID: string) {
+  return query(`
+    SELECT
+      cd.DetalleID        AS detalleID,
+      cd.NombreArticulo   AS articulo,
+      cd.Cantidad         AS cantidad,
+      cd.Subtotal         AS subtotal,
+      cd.MotivoCancelacion AS motivo,
+      cd.FechaCancelacion AS fechaCancelacion,
+      ISNULL(u.Nombre + ' ' + u.Apellido, '—') AS canceladoPor
+    FROM modu_rest_ComandaDetalle cd
+    LEFT JOIN modu_rest_Usuarios u ON cd.CanceladoPor = u.UsuarioID
+    WHERE cd.PedidoID = @pedidoID AND cd.EstadoItem = 'Cancelado'
+    ORDER BY cd.FechaCancelacion DESC
+  `, (req) => {
+    req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
+  });
 }
 
 // ── Solicitar cuenta ──────────────────────────────────

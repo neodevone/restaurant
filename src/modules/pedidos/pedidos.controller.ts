@@ -5,13 +5,14 @@ import Joi from 'joi';
 import { respond } from '../../shared/response.helper';
 import {
   listarPedidos, obtenerPedido, obtenerDetallePedido,
-  abrirPedido, agregarRonda, solicitarCuenta, cancelarPedido
+  abrirPedido, agregarRonda, solicitarCuenta, cancelarPedido,
+  cancelarItemPedido, itemsCanceladosPedido
 } from './pedidos.service';
 
 // ── Schemas ──────────────────────────────────────────
 
 const itemSchema = Joi.object({
-  articuloID:      Joi.number().integer().positive().required(), // ← era string().uuid()
+  articuloID:      Joi.number().integer().positive().required(),
   cantidad:        Joi.number().positive().required(),
   notasEspeciales: Joi.string().max(255).allow(null, '').optional(),
 });
@@ -31,6 +32,23 @@ const abrirPedidoSchema = Joi.object({
 const rondaSchema = Joi.object({
   items: Joi.array().items(itemSchema).min(1).required().messages({
     'array.min': 'Debes agregar al menos un artículo a la ronda',
+  }),
+});
+
+// Motivos cerrados: se agrupan bien en el informe de anulaciones
+// y evitan que el campo quede vacío o con texto inútil.
+const MOTIVOS = [
+  'Cliente cambió de opinión',
+  'Error al tomar el pedido',
+  'Producto agotado',
+  'Producto en mal estado',
+  'Otro',
+];
+
+const cancelarItemSchema = Joi.object({
+  motivo: Joi.string().max(200).required().messages({
+    'any.required': 'El motivo de la anulación es requerido',
+    'string.empty': 'El motivo de la anulación es requerido',
   }),
 });
 
@@ -92,6 +110,49 @@ export async function postAgregarRonda(
       value.items
     );
     respond.created(res, result, `Ronda #${result.numeroRonda} agregada correctamente`);
+  } catch (err) { next(err); }
+}
+
+// POST /pedidos/:id/items/:detalleID/cancelar   { motivo }
+export async function postCancelarItem(
+  req: Request, res: Response, next: NextFunction
+) {
+  try {
+    const { error, value } = cancelarItemSchema.validate(req.body);
+    if (error) { respond.badRequest(res, error.details[0].message); return; }
+
+    const result = await cancelarItemPedido(
+      req.params.id as string,
+      req.params.detalleID as string,
+      req.usuario!.usuarioID,
+      value.motivo
+    );
+
+    respond.ok(
+      res,
+      result,
+      `"${result.articulo}" retirado del pedido. ` +
+      `Nuevo total: $${result.pedido.totalCuenta.toLocaleString()}`
+    );
+  } catch (err) { next(err); }
+}
+
+// GET /pedidos/:id/items-cancelados
+export async function getItemsCancelados(
+  req: Request, res: Response, next: NextFunction
+) {
+  try {
+    const data = await itemsCanceladosPedido(req.params.id as string);
+    respond.ok(res, data);
+  } catch (err) { next(err); }
+}
+
+// GET /pedidos/motivos-anulacion
+export async function getMotivosAnulacion(
+  _req: Request, res: Response, next: NextFunction
+) {
+  try {
+    respond.ok(res, MOTIVOS);
   } catch (err) { next(err); }
 }
 

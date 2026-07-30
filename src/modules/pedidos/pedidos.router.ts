@@ -6,15 +6,23 @@ import { requireAdmin, requireRol } from '../../middlewares/rol.middleware';
 import {
   getPedidos, getPedido, getDetallePedido,
   postAbrirPedido, postAgregarRonda,
-  postSolicitarCuenta, postCancelarPedido
+  postSolicitarCuenta, postCancelarPedido,
+  postCancelarItem, getItemsCancelados, getMotivosAnulacion
 } from './pedidos.controller';
 
 export const pedidosRouter = Router();
 
 pedidosRouter.use(authMiddleware);
 
+// Motivos disponibles para anular un artículo.
+// Va antes de '/:id' para que la ruta genérica no lo capture.
+pedidosRouter.get('/motivos-anulacion',
+  requireRol('Administrador', 'Mesero', 'Cajero'),
+  getMotivosAnulacion
+);
+
 // Listar — con filtros opcionales
-// ?estado=Abierto  ?mesaID=xxx  ?turnoID=xxx  ?fecha=2026-02-26
+// ?estado=Abierto  ?mesaID=xxx  ?fecha=2026-02-26
 pedidosRouter.get('/',
   requireRol('Administrador', 'Mesero', 'Cajero'),
   getPedidos
@@ -25,10 +33,16 @@ pedidosRouter.get('/:id',
   getPedido
 );
 
-// Detalle completo con todos los ítems del pedido
+// Detalle vigente del pedido — excluye artículos cancelados
 pedidosRouter.get('/:id/detalle',
   requireRol('Administrador', 'Mesero', 'Cajero'),
   getDetallePedido
+);
+
+// Artículos que fueron retirados de este pedido
+pedidosRouter.get('/:id/items-cancelados',
+  requireRol('Administrador', 'Mesero', 'Cajero'),
+  getItemsCancelados
 );
 
 // Abrir pedido — mesero selecciona mesa y manda primera comanda
@@ -41,6 +55,15 @@ pedidosRouter.post('/',
 pedidosRouter.post('/:id/ronda',
   requireRol('Administrador', 'Mesero'),
   postAgregarRonda
+);
+
+// Quitar un artículo del pedido.
+// El cajero también puede: un plato en mal estado o un ítem de más
+// se resuelve en la caja, con el cliente enfrente.
+// Queda registrado con el usuario, el motivo y la hora.
+pedidosRouter.post('/:id/items/:detalleID/cancelar',
+  requireRol('Administrador', 'Mesero', 'Cajero'),
+  postCancelarItem
 );
 
 // Solicitar cuenta — mesa pasa a "Por Pagar"
