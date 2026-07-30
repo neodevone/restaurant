@@ -13,6 +13,7 @@ import {
   ventasPorDia,
   ventasPorHora,
   reporteMetodosPago,
+  reporteCanales,
   buscarPedidos,
   detalleCompletoPedido,
 } from './reportes.service';
@@ -102,6 +103,19 @@ export async function getMetodosPago(req: Request, res: Response, next: NextFunc
   try {
     const filtro = getFiltroFecha(req);
     const data = await reporteMetodosPago(filtro);
+    res.json({ ok: true, filtro, data });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ── Canales de venta ─────────────────────────────────
+
+// GET /reportes/canales?desde=&hasta=
+export async function getCanales(req: Request, res: Response, next: NextFunction) {
+  try {
+    const filtro = getFiltroFecha(req);
+    const data = await reporteCanales(filtro);
     res.json({ ok: true, filtro, data });
   } catch (err) {
     next(err);

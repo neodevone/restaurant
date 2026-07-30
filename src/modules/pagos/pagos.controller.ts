@@ -63,6 +63,7 @@ const fiadoSchema = Joi.object({
   nombreCliente: Joi.string().max(150).allow('', null).optional(),
   autorizadoPor: Joi.string().max(100).allow('', null).optional(),
   motivo:        Joi.string().max(300).allow('', null).optional(),
+  tipoPedido:    Joi.string().valid('Mesa', 'Para Llevar', 'Domicilio').optional(),
 });
 
 const anularSchema = Joi.object({

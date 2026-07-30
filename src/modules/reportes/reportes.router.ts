@@ -11,6 +11,7 @@ import {
   getVentasMensuales,
   getVentasAnuales,
   getMetodosPago,
+  getCanales,
   getMeseros,
   getDetalleMesero,
   getProductos,
@@ -41,6 +42,9 @@ reportesRouter.get('/ventas/anuales', rolesReporte, getVentasAnuales);
 
 // ── Métodos de pago ──────────────────────────────────
 reportesRouter.get('/metodos-pago', rolesReporte, getMetodosPago);
+
+// ── Canales de venta: Mesa / Para Llevar / Domicilio ─
+reportesRouter.get('/canales', rolesReporte, getCanales);
 
 // ── Meseros ──────────────────────────────────────────
 reportesRouter.get('/meseros', rolesReporte, getMeseros);

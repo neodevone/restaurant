@@ -69,6 +69,7 @@ export interface RegistrarFiadoDTO {
   nombreCliente?: string;
   autorizadoPor?: string;
   motivo?:        string;
+  tipoPedido?:    'Mesa' | 'Para Llevar' | 'Domicilio';
 }
 
 export interface PagoResumen {
@@ -308,6 +309,21 @@ export async function registrarPago(
     ...data.metadataPago,
   };
 
+  // 4b. El cajero tiene la última palabra sobre el canal de venta:
+  //     él sabe si el cliente se lo llevó. Se sincroniza el pedido para
+  //     que los informes por canal tengan una sola fuente de verdad.
+  const canal = metadataPago.tipoPedido;
+  if (canal && canal !== pedido.tipoPedido) {
+    await query(`
+      UPDATE modu_rest_Pedidos SET TipoPedido = @canal
+      WHERE PedidoID = @pedidoID
+    `, (req) => {
+      req.input('pedidoID', sql.UniqueIdentifier, data.pedidoID);
+      req.input('canal', sql.NVarChar, canal);
+    });
+    pedido.tipoPedido = canal;
+  }
+
   // 5. Insertar pago
   const pagoRows = await query<{ PagoID: string }>(`
     INSERT INTO modu_rest_Pagos (
@@ -470,6 +486,18 @@ export async function registrarCuentaPorCobrar(
 
   if (deuda <= 0)
     throw new AppError('Este pedido ya está completamente pagado', 409);
+
+  // 3b. Sincronizar el canal de venta elegido por el cajero
+  if (data.tipoPedido && data.tipoPedido !== pedido.tipoPedido) {
+    await query(`
+      UPDATE modu_rest_Pedidos SET TipoPedido = @canal
+      WHERE PedidoID = @pedidoID
+    `, (req) => {
+      req.input('pedidoID', sql.UniqueIdentifier, data.pedidoID);
+      req.input('canal', sql.NVarChar, data.tipoPedido!);
+    });
+    pedido.tipoPedido = data.tipoPedido;
+  }
 
   // 4. Metadata del crédito
   const metadataPago: MetadataPago = {

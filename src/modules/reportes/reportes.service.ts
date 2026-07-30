@@ -713,6 +713,175 @@ export async function resumenHoy() {
   };
 }
 
+// ── Informe por canal de venta ───────────────────────
+// Mesa / Para Llevar / Domicilio. La fuente de verdad es
+// Pedidos.TipoPedido, que el cajero actualiza al cobrar.
+
+export interface CanalResumen {
+  canal: string;
+  pedidos: number;
+  ventas: number;
+  ticketPromedio: number;
+  personas: number;
+  descuentos: number;
+  duracionPromedio: number;
+  recaudo: number;
+  efectivo: number;
+  tarjeta: number;
+  digital: number;
+  cartera: number;
+  participacion: number;
+}
+
+export interface CanalDia {
+  periodo: string;
+  mesa: number;
+  paraLlevar: number;
+  domicilio: number;
+  total: number;
+  pedidosMesa: number;
+  pedidosParaLlevar: number;
+  pedidosDomicilio: number;
+}
+
+const CANALES = ['Mesa', 'Para Llevar', 'Domicilio'];
+
+export async function reporteCanales(filtro: FiltroFecha): Promise<{
+  porCanal: CanalResumen[];
+  porDia: CanalDia[];
+}> {
+
+  const [ventas, cobros, porDia] = await Promise.all([
+    // Facturación por canal
+    query<{
+      canal: string; pedidos: number; ventas: number;
+      personas: number; descuentos: number; duracionPromedio: number;
+    }>(`
+      SELECT
+        ISNULL(p.TipoPedido, 'Mesa')     AS canal,
+        COUNT(p.PedidoID)                AS pedidos,
+        ISNULL(SUM(p.TotalCuenta), 0)    AS ventas,
+        ISNULL(SUM(p.NumeroPersonas), 0) AS personas,
+        ISNULL(SUM(p.TotalDescuento), 0) AS descuentos,
+        ISNULL(AVG(DATEDIFF(MINUTE, p.FechaApertura,
+          ISNULL(p.FechaCierre, SYSUTCDATETIME()))), 0) AS duracionPromedio
+      FROM modu_rest_Pedidos p
+      WHERE p.EstadoPedido IN ${ESTADOS_VENTA}
+        AND p.FechaCierre IS NOT NULL
+        AND ${FECHA_LOCAL('p.FechaCierre')} BETWEEN @desde AND @hasta
+      GROUP BY ISNULL(p.TipoPedido, 'Mesa')
+    `, (req) => {
+      req.input('desde', sql.Date, filtro.desde);
+      req.input('hasta', sql.Date, filtro.hasta);
+    }),
+
+    // Recaudo por canal: se agrupa el pago por el canal de su pedido
+    query<{
+      canal: string; recaudo: number;
+      efectivo: number; tarjeta: number; digital: number; cartera: number;
+    }>(`
+      SELECT
+        ISNULL(pe.TipoPedido, 'Mesa') AS canal,
+        ISNULL(SUM(CASE WHEN mp.Tipo <> 'Credito'
+              THEN pa.MontoPagado - pa.Vuelto ELSE 0 END), 0) AS recaudo,
+        ISNULL(SUM(CASE WHEN mp.Tipo = 'Efectivo'
+              THEN pa.MontoPagado - pa.Vuelto ELSE 0 END), 0) AS efectivo,
+        ISNULL(SUM(CASE WHEN mp.Tipo = 'Tarjeta'
+              THEN pa.MontoPagado - pa.Vuelto ELSE 0 END), 0) AS tarjeta,
+        ISNULL(SUM(CASE WHEN mp.Tipo = 'Digital'
+              THEN pa.MontoPagado - pa.Vuelto ELSE 0 END), 0) AS digital,
+        ISNULL(SUM(CASE WHEN mp.Tipo = 'Credito'
+              THEN pa.MontoEsperado ELSE 0 END), 0)           AS cartera
+      FROM modu_rest_Pagos pa
+      JOIN modu_rest_Pedidos     pe ON pa.PedidoID = pe.PedidoID
+      JOIN modu_rest_MetodosPago mp ON pa.MetodoID = mp.MetodoID
+      WHERE pa.Anulado = 0
+        AND ${FECHA_LOCAL('pa.FechaTransaccion')} BETWEEN @desde AND @hasta
+      GROUP BY ISNULL(pe.TipoPedido, 'Mesa')
+    `, (req) => {
+      req.input('desde', sql.Date, filtro.desde);
+      req.input('hasta', sql.Date, filtro.hasta);
+    }),
+
+    // Día por día, una columna por canal
+    query<CanalDia>(`
+      WITH Dias AS (
+        SELECT CAST(@desde AS DATE) AS Fecha
+        UNION ALL
+        SELECT DATEADD(DAY, 1, Fecha) FROM Dias WHERE Fecha < CAST(@hasta AS DATE)
+      )
+      SELECT
+        CONVERT(NVARCHAR(10), d.Fecha, 23) AS periodo,
+        ISNULL(v.mesa, 0)                  AS mesa,
+        ISNULL(v.paraLlevar, 0)            AS paraLlevar,
+        ISNULL(v.domicilio, 0)             AS domicilio,
+        ISNULL(v.total, 0)                 AS total,
+        ISNULL(v.pedidosMesa, 0)           AS pedidosMesa,
+        ISNULL(v.pedidosParaLlevar, 0)     AS pedidosParaLlevar,
+        ISNULL(v.pedidosDomicilio, 0)      AS pedidosDomicilio
+      FROM Dias d
+      OUTER APPLY (
+        SELECT
+          SUM(CASE WHEN ISNULL(p.TipoPedido,'Mesa') = 'Mesa'
+                   THEN p.TotalCuenta ELSE 0 END)                 AS mesa,
+          SUM(CASE WHEN p.TipoPedido = 'Para Llevar'
+                   THEN p.TotalCuenta ELSE 0 END)                 AS paraLlevar,
+          SUM(CASE WHEN p.TipoPedido = 'Domicilio'
+                   THEN p.TotalCuenta ELSE 0 END)                 AS domicilio,
+          SUM(p.TotalCuenta)                                      AS total,
+          SUM(CASE WHEN ISNULL(p.TipoPedido,'Mesa') = 'Mesa'
+                   THEN 1 ELSE 0 END)                             AS pedidosMesa,
+          SUM(CASE WHEN p.TipoPedido = 'Para Llevar'
+                   THEN 1 ELSE 0 END)                             AS pedidosParaLlevar,
+          SUM(CASE WHEN p.TipoPedido = 'Domicilio'
+                   THEN 1 ELSE 0 END)                             AS pedidosDomicilio
+        FROM modu_rest_Pedidos p
+        WHERE p.EstadoPedido IN ${ESTADOS_VENTA}
+          AND p.FechaCierre IS NOT NULL
+          AND ${FECHA_LOCAL('p.FechaCierre')} = d.Fecha
+      ) v
+      ORDER BY d.Fecha ASC
+      OPTION (MAXRECURSION 0)
+    `, (req) => {
+      req.input('desde', sql.Date, filtro.desde);
+      req.input('hasta', sql.Date, filtro.hasta);
+    }),
+  ]);
+
+  const totalVentas = ventas.reduce((s, v) => s + v.ventas, 0);
+
+  // Los tres canales siempre aparecen, aunque estén en cero,
+  // más cualquier valor inesperado que traiga la base.
+  const nombres = [...CANALES];
+  for (const v of ventas)
+    if (!nombres.includes(v.canal)) nombres.push(v.canal);
+
+  const porCanal: CanalResumen[] = nombres.map(canal => {
+    const v = ventas.find(x => x.canal === canal);
+    const c = cobros.find(x => x.canal === canal);
+    const vt = v?.ventas ?? 0;
+    const pd = v?.pedidos ?? 0;
+
+    return {
+      canal,
+      pedidos: pd,
+      ventas: redondear(vt),
+      ticketPromedio: redondear(pd > 0 ? vt / pd : 0),
+      personas: v?.personas ?? 0,
+      descuentos: redondear(v?.descuentos ?? 0),
+      duracionPromedio: v?.duracionPromedio ?? 0,
+      recaudo: redondear(c?.recaudo ?? 0),
+      efectivo: redondear(c?.efectivo ?? 0),
+      tarjeta: redondear(c?.tarjeta ?? 0),
+      digital: redondear(c?.digital ?? 0),
+      cartera: redondear(c?.cartera ?? 0),
+      participacion: totalVentas > 0 ? redondear((vt / totalVentas) * 100, 1) : 0,
+    };
+  });
+
+  return { porCanal, porDia };
+}
+
 // ── Compatibilidad con el front actual ───────────────
 // Mantiene la firma anterior para no romper nada mientras
 // se migran las pantallas.
