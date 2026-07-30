@@ -8,7 +8,7 @@ import {
   reporteMeseros,
   detallePedidosMesero,
   reporteProductos,
-  resumenTurno,
+  //resumenTurno,
   resumenHoy,
 } from './reportes.service';
 
@@ -93,7 +93,7 @@ export async function getProductos(req: Request, res: Response, next: NextFuncti
 }
 
 // ── Turno ─────────────────────────────────────────────
-
+/*
 // GET /reportes/turno/:id
 export async function getResumenTurno(req: Request, res: Response, next: NextFunction) {
   try {
@@ -103,6 +103,7 @@ export async function getResumenTurno(req: Request, res: Response, next: NextFun
     next(err);
   }
 }
+*/
 
 // ── Resumen hoy (dashboard Windows Forms) ────────────
 

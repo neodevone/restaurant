@@ -10,7 +10,7 @@ import {
     getMeseros,
     getDetalleMesero,
     getProductos,
-    getResumenTurno,
+    //getResumenTurno,
     getResumenHoy,
 } from './reportes.controller';
 
@@ -44,7 +44,7 @@ reportesRouter.get('/productos', rolesReporte, getProductos);
 
 // ── Turno ─────────────────────────────────────────────
 // GET /reportes/turno/:id
-reportesRouter.get('/turno/:id', rolesReporte, getResumenTurno);
+//reportesRouter.get('/turno/:id', rolesReporte, getResumenTurno);
 
 // ── Resumen del día ───────────────────────────────────
 // GET /reportes/hoy
