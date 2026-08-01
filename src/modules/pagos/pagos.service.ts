@@ -4,6 +4,7 @@ import { query, sql } from '../../config/database';
 import { AppError } from '../../middlewares/error.middleware';
 import { registrarEvento } from '../../shared/eventos.service';
 import { cambiarEstadoMesa } from '../mesas/mesas.service';
+import { exigirTurnoAbierto } from '../turnos/turnos.service';
 
 // ── Interfaces ───────────────────────────────────────
 
@@ -284,6 +285,10 @@ export async function registrarPago(
 
   const eraFiado = pedido.estadoPedido === 'Fiado';
 
+  // No se cobra sin caja abierta: el dinero tiene que caer en algún turno
+  // o el arqueo del día no cuadra.
+  const turnoID = await exigirTurnoAbierto();
+
   // 2. Calcular saldo pendiente
   const pagosActuales = await query<{ totalPagado: number }>(`
     SELECT ISNULL(SUM(MontoPagado), 0) AS totalPagado
@@ -327,13 +332,13 @@ export async function registrarPago(
   // 5. Insertar pago
   const pagoRows = await query<{ PagoID: string }>(`
     INSERT INTO modu_rest_Pagos (
-      PedidoID, MetodoID, CajeroID,
+      PedidoID, MetodoID, CajeroID, TurnoID,
       MontoPagado, MontoEsperado, Vuelto, Propina,
       ReferenciaExterna, MetadataPago
     )
     OUTPUT INSERTED.PagoID
     VALUES (
-      @pedidoID, @metodoID, @cajeroID,
+      @pedidoID, @metodoID, @cajeroID, @turnoID,
       @montoPagado, @montoEsperado, @vuelto, @propina,
       @referenciaExterna, @metadataPago
     )
@@ -341,6 +346,7 @@ export async function registrarPago(
     req.input('pedidoID',          sql.UniqueIdentifier, data.pedidoID);
     req.input('metodoID',          sql.UniqueIdentifier, data.metodoID);
     req.input('cajeroID',          sql.UniqueIdentifier, cajeroID);
+    req.input('turnoID',           sql.UniqueIdentifier, turnoID);
     req.input('montoPagado',       sql.Decimal(18, 2),   data.montoPagado);
     req.input('montoEsperado',     sql.Decimal(18, 2),   montoEsperado);
     req.input('vuelto',            sql.Decimal(18, 2),   vuelto);
@@ -481,6 +487,10 @@ export async function registrarCuentaPorCobrar(
   if (metodoRows[0].tipo !== 'Credito')
     throw new AppError('El método seleccionado no es una cuenta por cobrar', 400);
 
+  // El fiado no mueve efectivo, pero pertenece al turno: es una venta
+  // del período y tiene que aparecer en el cierre.
+  const turnoID = await exigirTurnoAbierto();
+
   // 3. El saldo que queda es la deuda
   const deuda = await saldoPendienteDe(data.pedidoID, pedido.totalCuenta);
 
@@ -513,13 +523,13 @@ export async function registrarCuentaPorCobrar(
   // 5. Insertar la fila del fiado
   const pagoRows = await query<{ PagoID: string }>(`
     INSERT INTO modu_rest_Pagos (
-      PedidoID, MetodoID, CajeroID,
+      PedidoID, MetodoID, CajeroID, TurnoID,
       MontoPagado, MontoEsperado, Vuelto, Propina,
       ReferenciaExterna, MetadataPago
     )
     OUTPUT INSERTED.PagoID
     VALUES (
-      @pedidoID, @metodoID, @cajeroID,
+      @pedidoID, @metodoID, @cajeroID, @turnoID,
       0, @deuda, 0, 0,
       @referenciaExterna, @metadataPago
     )
@@ -527,6 +537,7 @@ export async function registrarCuentaPorCobrar(
     req.input('pedidoID',          sql.UniqueIdentifier, data.pedidoID);
     req.input('metodoID',          sql.UniqueIdentifier, data.metodoID);
     req.input('cajeroID',          sql.UniqueIdentifier, cajeroID);
+    req.input('turnoID',           sql.UniqueIdentifier, turnoID);
     req.input('deuda',             sql.Decimal(18, 2),   deuda);
     req.input('referenciaExterna', sql.NVarChar,         data.cedula);
     req.input('metadataPago',      sql.NVarChar,         JSON.stringify(metadataPago));

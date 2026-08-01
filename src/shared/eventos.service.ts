@@ -15,7 +15,11 @@ export type TipoEvento =
   | 'COMANDA_LISTA'
   | 'PAGO_RECIBIDO'
   | 'ARTICULO_AGOTADO'
-  | 'ALERTA_KDS_ROJA';
+  | 'ALERTA_KDS_ROJA'
+  // Caja
+  | 'TURNO_ABIERTO'
+  | 'TURNO_CERRADO'
+  | 'MOVIMIENTO_CAJA';
 
 interface RegistrarEventoParams {
   tipo: TipoEvento;
@@ -87,6 +91,19 @@ function routearEvento(
       emitirEventoMultiple(
         [ROOMS.CAJA, ROOMS.ADMIN],
         EVENTOS_SOCKET.PAGO_RECIBIDO,
+        data
+      );
+      break;
+
+    // Apertura, cierre y movimientos de caja. Van a caja y al admin:
+    // el dueño quiere enterarse de un retiro apenas ocurre, y la
+    // pantalla de caja tiene que refrescar su arqueo.
+    case 'TURNO_ABIERTO':
+    case 'TURNO_CERRADO':
+    case 'MOVIMIENTO_CAJA':
+      emitirEventoMultiple(
+        [ROOMS.CAJA, ROOMS.ADMIN],
+        EVENTOS_SOCKET.METRICAS_ACTUALIZADAS,
         data
       );
       break;

@@ -5,42 +5,50 @@ import { authMiddleware } from '../../middlewares/auth.middleware';
 import { requireAdmin, requireRol } from '../../middlewares/rol.middleware';
 import {
   getTurnoActivo, getTurno, getTurnos,
-  postAbrirTurno, postCerrarTurno, getResumenTurno
+  postAbrirTurno, postCerrarTurno,
+  getArqueo, getResumenTurno,
+  getTiposMovimiento, getMovimientos,
+  postMovimiento, postAnularMovimiento
 } from './turnos.controller';
 
 export const turnosRouter = Router();
 
 turnosRouter.use(authMiddleware);
 
-// Turno activo del usuario autenticado
-turnosRouter.get('/activo',
-  requireRol('Administrador', 'Cajero'),
-  getTurnoActivo
-);
+const rolesCaja = requireRol('Administrador', 'Cajero');
 
-// Historial — ?fecha=2026-02-26
-turnosRouter.get('/',
-  requireRol('Administrador', 'Cajero'),
-  getTurnos
-);
+// ── Rutas fijas primero, para que '/:id' no las capture ──
 
-turnosRouter.get('/:id',
-  requireRol('Administrador', 'Cajero'),
-  getTurno
-);
+// Turno abierto en este momento. La caja es una sola, así que
+// no depende del usuario que pregunte.
+turnosRouter.get('/activo', rolesCaja, getTurnoActivo);
 
-// Reporte de cierre — top artículos, totales por método de pago
-turnosRouter.get('/:id/resumen',
-  requireRol('Administrador', 'Cajero'),
-  getResumenTurno
-);
+// Tipos de movimiento válidos, para armar el formulario
+turnosRouter.get('/tipos-movimiento', rolesCaja, getTiposMovimiento);
 
-turnosRouter.post('/abrir',
-  requireRol('Administrador', 'Cajero'),
-  postAbrirTurno
-);
+// Historial — ?desde=&hasta=&estado=Cerrado
+turnosRouter.get('/', rolesCaja, getTurnos);
 
-turnosRouter.post('/:id/cerrar',
-  requireRol('Administrador', 'Cajero'),
-  postCerrarTurno
-);
+// Abrir caja
+turnosRouter.post('/abrir', rolesCaja, postAbrirTurno);
+
+// Anular un movimiento ya registrado
+turnosRouter.post('/movimientos/:movimientoID/anular',
+  rolesCaja, postAnularMovimiento);
+
+// ── Rutas por turno ──────────────────────────────────
+
+turnosRouter.get('/:id', rolesCaja, getTurno);
+
+// Arqueo en vivo: cuánto debería haber en el cajón ahora mismo
+turnosRouter.get('/:id/arqueo', rolesCaja, getArqueo);
+
+// Resumen de cierre: totales, métodos, movimientos y top productos
+turnosRouter.get('/:id/resumen', rolesCaja, getResumenTurno);
+
+// Movimientos de caja del turno
+turnosRouter.get('/:id/movimientos', rolesCaja, getMovimientos);
+turnosRouter.post('/:id/movimientos', rolesCaja, postMovimiento);
+
+// Cerrar caja con el conteo físico
+turnosRouter.post('/:id/cerrar', rolesCaja, postCerrarTurno);
