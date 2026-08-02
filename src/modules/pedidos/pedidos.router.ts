@@ -45,15 +45,15 @@ pedidosRouter.get('/:id/items-cancelados',
   getItemsCancelados
 );
 
-// Abrir pedido — mesero selecciona mesa y manda primera comanda
+// Abrir pedido — el mesero desde la mesa, el cajero desde el mostrador
 pedidosRouter.post('/',
-  requireRol('Administrador', 'Mesero'),
+  requireRol('Administrador', 'Mesero', 'Cajero'),
   postAbrirPedido
 );
 
 // Nueva ronda — cliente pide más sin cancelar lo anterior
 pedidosRouter.post('/:id/ronda',
-  requireRol('Administrador', 'Mesero'),
+  requireRol('Administrador', 'Mesero', 'Cajero'),
   postAgregarRonda
 );
 
@@ -68,12 +68,13 @@ pedidosRouter.post('/:id/items/:detalleID/cancelar',
 
 // Solicitar cuenta — mesa pasa a "Por Pagar"
 pedidosRouter.post('/:id/solicitar-cuenta',
-  requireRol('Administrador', 'Mesero'),
+  requireRol('Administrador', 'Mesero', 'Cajero'),
   postSolicitarCuenta
 );
 
-// Cancelar — solo admin o mesero con pedido no pagado
+// Cancelar el pedido completo. El cajero lo necesita para descartar
+// una venta de mostrador que el cliente abandonó antes de pagar.
 pedidosRouter.post('/:id/cancelar',
-  requireRol('Administrador', 'Mesero'),
+  requireRol('Administrador', 'Mesero', 'Cajero'),
   postCancelarPedido
 );
