@@ -6,7 +6,7 @@ import { respond } from '../../shared/response.helper';
 import {
   listarPedidos, obtenerPedido, obtenerDetallePedido,
   abrirPedido, agregarRonda, solicitarCuenta, cancelarPedido,
-  cancelarItemPedido, itemsCanceladosPedido
+  cancelarItemPedido, itemsCanceladosPedido, cambiarCantidadItem
 } from './pedidos.service';
 
 // ── Schemas ──────────────────────────────────────────
@@ -44,6 +44,13 @@ const MOTIVOS = [
   'Producto en mal estado',
   'Otro',
 ];
+
+const cantidadSchema = Joi.object({
+  cantidad: Joi.number().positive().required().messages({
+    'any.required':    'La cantidad es requerida',
+    'number.positive': 'La cantidad debe ser mayor a cero',
+  }),
+});
 
 const cancelarItemSchema = Joi.object({
   motivo: Joi.string().max(200).required().messages({
@@ -132,6 +139,28 @@ export async function postCancelarItem(
       res,
       result,
       `"${result.articulo}" retirado del pedido. ` +
+      `Nuevo total: $${result.pedido.totalCuenta.toLocaleString()}`
+    );
+  } catch (err) { next(err); }
+}
+
+// PATCH /pedidos/:id/items/:detalleID   { cantidad }
+export async function patchCantidadItem(
+  req: Request, res: Response, next: NextFunction
+) {
+  try {
+    const { error, value } = cantidadSchema.validate(req.body);
+    if (error) { respond.badRequest(res, error.details[0].message); return; }
+
+    const result = await cambiarCantidadItem(
+      req.params.id as string,
+      req.params.detalleID as string,
+      value.cantidad
+    );
+
+    respond.ok(
+      res, result,
+      `"${result.articulo}" quedó en ${value.cantidad}. ` +
       `Nuevo total: $${result.pedido.totalCuenta.toLocaleString()}`
     );
   } catch (err) { next(err); }

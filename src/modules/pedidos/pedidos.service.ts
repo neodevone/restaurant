@@ -572,6 +572,105 @@ export async function cancelarItemPedido(
   };
 }
 
+// ── Cambiar la cantidad de un artículo ───────────────
+//
+// Distinto de cancelar: aquí el artículo sigue en el pedido, solo
+// cambia cuánto se lleva el cliente. Corregir "puse 3 y era 2" a los
+// diez segundos no debería ensuciar el informe de anulaciones.
+//
+// Bajar a cero equivale a cancelar, y para eso está cancelarItemPedido.
+
+export async function cambiarCantidadItem(
+  pedidoID:  string,
+  detalleID: string,
+  cantidad:  number
+): Promise<{ pedido: Pedido; articulo: string; nuevoSubtotal: number }> {
+
+  if (cantidad <= 0)
+    throw new AppError('La cantidad debe ser mayor a cero. Para quitar el artículo, cancélalo.', 400);
+
+  // 1. El pedido debe ser modificable
+  const pedidoRows = await query<{ estadoPedido: string; totalCuenta: number }>(`
+    SELECT EstadoPedido AS estadoPedido, TotalCuenta AS totalCuenta
+    FROM modu_rest_Pedidos WHERE PedidoID = @pedidoID
+  `, (req) => {
+    req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
+  });
+
+  if (pedidoRows.length === 0) throw new AppError('Pedido no encontrado', 404);
+
+  if (!ESTADOS_EDITABLES.includes(pedidoRows[0].estadoPedido))
+    throw new AppError(
+      `No se puede modificar un pedido en estado ${pedidoRows[0].estadoPedido}`, 409);
+
+  // 2. El artículo debe existir y estar vigente
+  const itemRows = await query<{
+    articulo: string; cantidad: number;
+    precio: number; subtotal: number; estadoItem: string;
+  }>(`
+    SELECT
+      cd.NombreArticulo       AS articulo,
+      cd.Cantidad             AS cantidad,
+      cd.PrecioVentaHistorico AS precio,
+      cd.Subtotal             AS subtotal,
+      cd.EstadoItem           AS estadoItem
+    FROM modu_rest_ComandaDetalle cd
+    WHERE cd.DetalleID = @detalleID AND cd.PedidoID = @pedidoID
+  `, (req) => {
+    req.input('detalleID', sql.UniqueIdentifier, detalleID);
+    req.input('pedidoID',  sql.UniqueIdentifier, pedidoID);
+  });
+
+  if (itemRows.length === 0)
+    throw new AppError('El artículo no pertenece a este pedido', 404);
+
+  const item = itemRows[0];
+
+  if (item.estadoItem === 'Cancelado')
+    throw new AppError('Este artículo está cancelado', 409);
+
+  // 3. No dejar el total por debajo de lo ya cobrado
+  const nuevoSubtotal = item.precio * cantidad;
+  const nuevoTotal =
+    pedidoRows[0].totalCuenta - item.subtotal + nuevoSubtotal;
+
+  const pagos = await query<{ pagado: number }>(`
+    SELECT ISNULL(SUM(pa.MontoPagado - pa.Vuelto), 0) AS pagado
+    FROM modu_rest_Pagos pa
+    WHERE pa.PedidoID = @pedidoID AND pa.Anulado = 0
+  `, (req) => {
+    req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
+  });
+
+  if (nuevoTotal < pagos[0].pagado) {
+    throw new AppError(
+      `No se puede reducir tanto: el pedido quedaría en ` +
+      `$${nuevoTotal.toLocaleString()} y ya se cobraron ` +
+      `$${pagos[0].pagado.toLocaleString()}.`,
+      409);
+  }
+
+  // 4. Actualizar la línea
+  await query(`
+    UPDATE modu_rest_ComandaDetalle SET
+      Cantidad = @cantidad,
+      Subtotal = @subtotal
+    WHERE DetalleID = @detalleID
+  `, (req) => {
+    req.input('detalleID', sql.UniqueIdentifier, detalleID);
+    req.input('cantidad',  sql.Decimal(10, 2),   cantidad);
+    req.input('subtotal',  sql.Decimal(18, 2),   nuevoSubtotal);
+  });
+
+  await recalcularTotales(pedidoID);
+
+  return {
+    pedido: await obtenerPedido(pedidoID),
+    articulo: item.articulo,
+    nuevoSubtotal,
+  };
+}
+
 // ── Artículos cancelados de un pedido ────────────────
 // Para mostrarlos tachados donde haga falta.
 

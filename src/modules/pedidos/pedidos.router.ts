@@ -7,7 +7,8 @@ import {
   getPedidos, getPedido, getDetallePedido,
   postAbrirPedido, postAgregarRonda,
   postSolicitarCuenta, postCancelarPedido,
-  postCancelarItem, getItemsCancelados, getMotivosAnulacion
+  postCancelarItem, getItemsCancelados, getMotivosAnulacion,
+  patchCantidadItem
 } from './pedidos.controller';
 
 export const pedidosRouter = Router();
@@ -64,6 +65,13 @@ pedidosRouter.post('/:id/ronda',
 pedidosRouter.post('/:id/items/:detalleID/cancelar',
   requireRol('Administrador', 'Mesero', 'Cajero'),
   postCancelarItem
+);
+
+// Cambiar la cantidad de un artículo ya enviado.
+// Es corrección, no anulación: el artículo sigue en el pedido.
+pedidosRouter.patch('/:id/items/:detalleID',
+  requireRol('Administrador', 'Mesero', 'Cajero'),
+  patchCantidadItem
 );
 
 // Solicitar cuenta — mesa pasa a "Por Pagar"
