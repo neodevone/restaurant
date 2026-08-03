@@ -560,6 +560,50 @@ export async function resumenTurno(turnoID: string) {
     listarMovimientos(turnoID),
   ]);
 
+  // ── Enlace con el turno anterior ──
+  // La base de un turno debería ser lo que contó el turno previo.
+  // Si no coincide, hubo un retiro entre cierre y apertura que nadie
+  // registró, y el documento del relevo tiene que dejarlo visible.
+  const previo = await query<{
+    turnoID: string; cerradoPor: string;
+    fechaCierre: string; montoFinal: number;
+  }>(`
+    SELECT TOP 1
+      t.TurnoID     AS turnoID,
+      ISNULL(u.Nombre + ' ' + u.Apellido, '—') AS cerradoPor,
+      t.FechaCierre AS fechaCierre,
+      t.MontoFinal  AS montoFinal
+    FROM modu_rest_TurnosCaja t
+    LEFT JOIN modu_rest_Usuarios u ON t.UsuarioCierre = u.UsuarioID
+    WHERE t.Estado = 'Cerrado'
+      AND t.FechaCierre IS NOT NULL
+      AND t.FechaCierre <= @fechaApertura
+      AND t.TurnoID <> @turnoID
+    ORDER BY t.FechaCierre DESC
+  `, (req) => {
+    req.input('turnoID',       sql.UniqueIdentifier, turnoID);
+    req.input('fechaApertura', sql.DateTime2,        turno.fechaApertura);
+  });
+
+  const anterior = previo[0] ?? null;
+  const enlace = anterior
+    ? {
+        hayAnterior:     true,
+        cerradoPor:      anterior.cerradoPor,
+        fechaCierre:     anterior.fechaCierre,
+        montoFinalPrevio: redondear(anterior.montoFinal ?? 0),
+        // Negativo = salió plata entre el cierre anterior y esta apertura
+        diferenciaRelevo: redondear(
+          turno.montoInicial - (anterior.montoFinal ?? 0)),
+      }
+    : {
+        hayAnterior:      false,
+        cerradoPor:       null,
+        fechaCierre:      null,
+        montoFinalPrevio: 0,
+        diferenciaRelevo: 0,
+      };
+
   const metodos = await query(`
     SELECT
       mp.Nombre                                  AS metodo,
@@ -595,5 +639,5 @@ export async function resumenTurno(turnoID: string) {
     req.input('turnoID', sql.UniqueIdentifier, turnoID);
   });
 
-  return { turno, arqueo, movimientos, metodos, productos };
+  return { turno, arqueo, movimientos, metodos, productos, enlace };
 }
