@@ -64,6 +64,14 @@ export interface ResumenPeriodo {
   variacionVentas: number | null;   // % , null si no hay base
   variacionPedidos: number | null;
   variacionTicket: number | null;
+
+  // ── Cartera acumulada ──
+  // Estos NO son del período: son una foto del momento. La deuda
+  // sigue viva aunque venga de meses atrás, y por eso no se
+  // reinicia cuando cambia el día.
+  carteraViva: number;
+  carteraVencida: number;      // más de 30 días sin pagar
+  clientesConDeuda: number;
 }
 
 export interface VentaDia {
@@ -189,7 +197,7 @@ export async function resumenPeriodo(
 
   const anterior = periodoAnterior(filtro);
 
-  const [ventasAct, ventasAnt, cobros, cartera, recup] = await Promise.all([
+  const [ventasAct, ventasAnt, cobros, cartera, recup, viva] = await Promise.all([
     bloqueVentas(filtro),
     bloqueVentas(anterior),
 
@@ -251,6 +259,38 @@ export async function resumenPeriodo(
       req.input('desde', sql.Date, filtro.desde);
       req.input('hasta', sql.Date, filtro.hasta);
     }),
+
+    // Cartera viva: toda la deuda sin saldar, de cualquier fecha.
+    // No lleva filtro de período a propósito.
+    query<{ total: number; vencida: number; clientes: number }>(`
+      SELECT
+        ISNULL(SUM(x.saldo), 0) AS total,
+        ISNULL(SUM(CASE WHEN x.dias > 30 THEN x.saldo ELSE 0 END), 0) AS vencida,
+        COUNT(DISTINCT x.cedula) AS clientes
+      FROM (
+        SELECT
+          JSON_VALUE(f.MetadataPago, '$.cedula') AS cedula,
+          DATEDIFF(DAY, f.FechaTransaccion, SYSUTCDATETIME()) AS dias,
+          CASE WHEN f.MontoEsperado - ISNULL(ab.abonado, 0) > 0
+               THEN f.MontoEsperado - ISNULL(ab.abonado, 0)
+               ELSE 0 END AS saldo
+        FROM modu_rest_Pagos f
+        JOIN modu_rest_MetodosPago mp ON f.MetodoID = mp.MetodoID
+        OUTER APPLY (
+          SELECT SUM(a.MontoPagado - a.Vuelto) AS abonado
+          FROM modu_rest_Pagos a
+          JOIN modu_rest_MetodosPago am ON a.MetodoID = am.MetodoID
+          WHERE a.PedidoID = f.PedidoID
+            AND a.Anulado  = 0
+            AND am.Tipo <> 'Credito'
+            AND a.FechaTransaccion > f.FechaTransaccion
+        ) ab
+        WHERE mp.Tipo = 'Credito'
+          AND f.Anulado = 0
+          AND ISJSON(f.MetadataPago) = 1
+      ) x
+      WHERE x.saldo > 0
+    `),
   ]);
 
   const c = cobros[0];
@@ -286,6 +326,10 @@ export async function resumenPeriodo(
     variacionVentas: variacion(ventasAct.ventas, ventasAnt.ventas),
     variacionPedidos: variacion(ventasAct.pedidos, ventasAnt.pedidos),
     variacionTicket: variacion(ticket, ticketAnt),
+
+    carteraViva:      redondear(viva[0].total),
+    carteraVencida:   redondear(viva[0].vencida),
+    clientesConDeuda: viva[0].clientes,
   };
 }
 
@@ -706,6 +750,22 @@ export async function resumenHoy() {
   return {
     fecha: hoy,
     resumen,
+    // Compatibilidad con la app móvil, que consume `ventas` con la
+    // forma anterior. Se devuelve siempre un objeto, nunca null, para
+    // que un día sin ventas tampoco rompa la pantalla.
+    ventas: {
+      periodo: hoy,
+      totalVentas: resumen.ventas,
+      totalPedidos: resumen.pedidos,
+      ticketPromedio: resumen.ticketPromedio,
+      totalImpuestos: 0,
+      totalDescuentos: resumen.descuentos,
+      totalPropinas: resumen.propinas,
+      ventaEfectivo: resumen.efectivo,
+      ventaTarjeta: resumen.tarjeta,
+      ventaDigital: resumen.digital,
+      ventaDomicilio: 0,
+    },
     meseros: meseros.filter(m => m.totalPedidos > 0).slice(0, 5),
     productos: productos.slice(0, 10),
     horas,
