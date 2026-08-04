@@ -16,6 +16,7 @@ export type TipoEvento =
   | 'PAGO_RECIBIDO'
   | 'ARTICULO_AGOTADO'
   | 'ALERTA_KDS_ROJA'
+  | 'PEDIDO_ENTREGADO'
   // Caja
   | 'TURNO_ABIERTO'
   | 'TURNO_CERRADO'
@@ -76,6 +77,16 @@ function routearEvento(
 
     case 'ALERTA_KDS_ROJA':
       emitirEvento(ROOMS.ADMIN, EVENTOS_SOCKET.ALERTA_KDS, data);
+      break;
+
+    // El mesero entregó en la mesa: cambia el color de la tarjeta
+    // y se habilita el cobro. Sala y caja tienen que enterarse ya.
+    case 'PEDIDO_ENTREGADO':
+      emitirEventoMultiple(
+        [ROOMS.SALA, ROOMS.CAJA, ROOMS.ADMIN],
+        EVENTOS_SOCKET.MESA_ACTUALIZADA,
+        data
+      );
       break;
 
     case 'MESA_ABIERTA':

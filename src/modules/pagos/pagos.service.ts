@@ -5,6 +5,7 @@ import { AppError } from '../../middlewares/error.middleware';
 import { registrarEvento } from '../../shared/eventos.service';
 import { cambiarEstadoMesa } from '../mesas/mesas.service';
 import { exigirTurnoAbierto } from '../turnos/turnos.service';
+import { comandasPendientesPedido } from '../comandas/comandas.service';
 
 // ── Interfaces ───────────────────────────────────────
 
@@ -285,6 +286,22 @@ export async function registrarPago(
 
   const eraFiado = pedido.estadoPedido === 'Fiado';
 
+  // No se cobra una mesa cuya comida todavía no se entregó. La regla
+  // vive aquí y no solo en el botón del escritorio: un botón
+  // deshabilitado se salta por cualquier otro camino.
+  //
+  // Solo aplica a pedidos CON mesa. Mostrador y domicilios se cobran
+  // en el momento y sus comandas nacen despachadas.
+  if (pedido.mesaID) {
+    const pendientes = await comandasPendientesPedido(data.pedidoID);
+    if (pendientes > 0) {
+      throw new AppError(
+        `Este pedido todavía no se ha entregado en la mesa. ` +
+        `Falta(n) ${pendientes} ronda(s) por entregar.`,
+        409);
+    }
+  }
+
   // No se cobra sin caja abierta: el dinero tiene que caer en algún turno
   // o el arqueo del día no cuadra.
   const turnoID = await exigirTurnoAbierto();
@@ -486,6 +503,23 @@ export async function registrarCuentaPorCobrar(
 
   if (metodoRows[0].tipo !== 'Credito')
     throw new AppError('El método seleccionado no es una cuenta por cobrar', 400);
+
+
+  // No se cobra una mesa cuya comida todavía no se entregó. La regla
+  // vive aquí y no solo en el botón del escritorio: un botón
+  // deshabilitado se salta por cualquier otro camino.
+  //
+  // Solo aplica a pedidos CON mesa. Mostrador y domicilios se cobran
+  // en el momento y sus comandas nacen despachadas.
+  if (pedido.mesaID) {
+    const pendientes = await comandasPendientesPedido(data.pedidoID);
+    if (pendientes > 0) {
+      throw new AppError(
+        `Este pedido todavía no se ha entregado en la mesa. ` +
+        `Falta(n) ${pendientes} ronda(s) por entregar.`,
+        409);
+    }
+  }
 
   // El fiado no mueve efectivo, pero pertenece al turno: es una venta
   // del período y tiene que aparecer en el cierre.

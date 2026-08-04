@@ -31,6 +31,20 @@ export interface MesaConPedido extends Mesa {
   mesero: string | null;
   minutosOcupada: number | null;
   totalCuenta: number | null;
+
+  // ── Estado de servicio ──
+  // Se DERIVA de las comandas, no se guarda en ninguna columna.
+  // Guardarlo en dos lados abre la puerta a que se desincronicen.
+  //
+  //   Libre     → sin pedido activo
+  //   Tomado    → hay rondas sin entregar
+  //   Entregado → todo entregado, falta cobrar
+  estadoServicio: 'Libre' | 'Tomado' | 'Entregado';
+  rondas: number;
+  rondasPendientes: number;
+  minutosSinEntregar: number | null;
+  demorado: boolean;
+  puedeCobrar: boolean;
 }
 
 export type EstadoMesa =
@@ -38,6 +52,10 @@ export type EstadoMesa =
   | 'Ocupada'
   | 'Reservada'
   | 'Cuenta-Pedida';
+
+// Minutos desde que se envió una ronda para marcarla demorada.
+// Solo es una señal visual para el cajero; no bloquea nada.
+export const UMBRAL_DEMORA = 20;
 
 // ── ZONAS ────────────────────────────────────────────
 
@@ -49,7 +67,7 @@ export async function listarZonas(): Promise<Zona[]> {
       Activa  AS activa,
       Orden   AS orden
     FROM modu_rest_Zonas
-    WHERE Activa = 1   -- ← agregar
+    WHERE Activa = 1
     ORDER BY Orden, Nombre
   `);
 }
@@ -108,6 +126,13 @@ export async function listarMesas(zonaID?: string): Promise<Mesa[]> {
   });
 }
 
+/**
+ * Mapa de mesas con su pedido activo y el estado de servicio.
+ *
+ * El estado de servicio sale de las comandas: si alguna ronda
+ * no está despachada, la mesa está "Tomado"; si todas lo están,
+ * pasa a "Entregado" y ya se puede cobrar.
+ */
 export async function listarMesasConPedido(): Promise<MesaConPedido[]> {
   return query<MesaConPedido>(`
     SELECT
@@ -125,13 +150,44 @@ export async function listarMesasConPedido(): Promise<MesaConPedido[]> {
       p.NumeroPersonas AS numeroPersonas,
       u.Nombre + ' ' + u.Apellido AS mesero,
       DATEDIFF(MINUTE, p.FechaApertura, SYSUTCDATETIME()) AS minutosOcupada,
-      p.TotalCuenta    AS totalCuenta
+      p.TotalCuenta    AS totalCuenta,
+
+      -- ── Estado de servicio derivado ──
+      CASE
+        WHEN p.PedidoID IS NULL              THEN 'Libre'
+        WHEN ISNULL(cm.pendientes, 0) > 0    THEN 'Tomado'
+        ELSE 'Entregado'
+      END                                    AS estadoServicio,
+
+      ISNULL(cm.total, 0)                    AS rondas,
+      ISNULL(cm.pendientes, 0)               AS rondasPendientes,
+
+      -- Cuánto lleva esperando la ronda más vieja sin entregar
+      cm.minutosSinEntregar                  AS minutosSinEntregar,
+
+      CASE WHEN ISNULL(cm.minutosSinEntregar, 0) >= ${UMBRAL_DEMORA}
+           THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END AS demorado,
+
+      -- El cajero solo cobra lo que ya se entregó
+      CASE WHEN p.PedidoID IS NOT NULL AND ISNULL(cm.pendientes, 0) = 0
+           THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END AS puedeCobrar
+
     FROM modu_rest_Mesas m
     JOIN modu_rest_Zonas z ON m.ZonaID = z.ZonaID
     LEFT JOIN modu_rest_Pedidos p
       ON  p.MesaID = m.MesaID
       AND p.EstadoPedido IN ('Abierto', 'Por Pagar')
     LEFT JOIN modu_rest_Usuarios u ON p.MeseroID = u.UsuarioID
+    OUTER APPLY (
+      SELECT
+        COUNT(*)                                                  AS total,
+        SUM(CASE WHEN c.Estado <> 'Despachada' THEN 1 ELSE 0 END) AS pendientes,
+        MAX(CASE WHEN c.Estado <> 'Despachada'
+                 THEN DATEDIFF(MINUTE, c.HoraEnviada, SYSUTCDATETIME())
+                 ELSE NULL END)                                   AS minutosSinEntregar
+      FROM modu_rest_Comandas c
+      WHERE c.PedidoID = p.PedidoID
+    ) cm
     WHERE m.Activa = 1
     ORDER BY z.Orden, z.Nombre,
     -- Ordenamiento natural por alias

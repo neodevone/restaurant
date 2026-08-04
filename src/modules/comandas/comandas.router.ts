@@ -4,71 +4,34 @@ import { Router } from 'express';
 import { authMiddleware } from '../../middlewares/auth.middleware';
 import { requireRol } from '../../middlewares/rol.middleware';
 import {
-  getKDS, getComanda, getItemsComanda, getHistorialPedido,
-  postMarcarVista, postMarcarEnPreparacion,
-  postMarcarLista, postMarcarDespachada,
-  patchPrioridad, patchNotaCocina
+  getComanda, getItemsComanda, getHistorialPedido, getPendientesPedido,
+  postMarcarDespachada, postMarcarPedidoEntregado
 } from './comandas.controller';
 
 export const comandasRouter = Router();
 
 comandasRouter.use(authMiddleware);
 
-// Vista principal KDS — cocina la consume en tiempo real
-comandasRouter.get('/kds',
-  requireRol('Administrador', 'Cocina'),
-  getKDS
-);
+const lectura = requireRol('Administrador', 'Mesero', 'Cajero');
+// Solo quien atiende la mesa confirma la entrega. El cajero no:
+// él no ve si los platos llegaron.
+const entrega = requireRol('Administrador', 'Mesero');
 
-// Historial de comandas de un pedido específico
-comandasRouter.get('/pedido/:pedidoID',
-  requireRol('Administrador', 'Mesero', 'Cajero', 'Cocina'),
-  getHistorialPedido
-);
+// ── Rutas por pedido (van antes de '/:id') ───────────
 
-comandasRouter.get('/:id',
-  requireRol('Administrador', 'Cocina', 'Mesero'),
-  getComanda
-);
+// Rondas de un pedido, con su hora de entrega
+comandasRouter.get('/pedido/:pedidoID', lectura, getHistorialPedido);
 
-// Ítems de una comanda
-comandasRouter.get('/:id/items',
-  requireRol('Administrador', 'Cocina', 'Mesero'),
-  getItemsComanda
-);
+// ¿Se puede cobrar ya? El escritorio consulta esto.
+comandasRouter.get('/pedido/:pedidoID/pendientes', lectura, getPendientesPedido);
 
-// ── Flujo del KDS (transiciones de estado) ───────────
-// Pendiente → Vista → En Preparacion → Lista → Despachada
+// El mesero entregó todo lo que faltaba del pedido
+comandasRouter.post('/pedido/:pedidoID/entregado', entrega, postMarcarPedidoEntregado);
 
-comandasRouter.post('/:id/vista',
-  requireRol('Administrador', 'Cocina'),
-  postMarcarVista
-);
+// ── Rutas por comanda ────────────────────────────────
 
-comandasRouter.post('/:id/en-preparacion',
-  requireRol('Administrador', 'Cocina'),
-  postMarcarEnPreparacion
-);
+comandasRouter.get('/:id', lectura, getComanda);
+comandasRouter.get('/:id/items', lectura, getItemsComanda);
 
-comandasRouter.post('/:id/lista',
-  requireRol('Administrador', 'Cocina'),
-  postMarcarLista
-);
-
-// Despachar — mesero confirma que llevó los platos
-comandasRouter.post('/:id/despachada',
-  requireRol('Administrador', 'Mesero'),
-  postMarcarDespachada
-);
-
-// Urgente — sube la comanda al tope del KDS
-comandasRouter.patch('/:id/prioridad',
-  requireRol('Administrador', 'Cocina', 'Mesero'),
-  patchPrioridad
-);
-
-// Nota especial a cocina
-comandasRouter.patch('/:id/nota',
-  requireRol('Administrador', 'Cocina', 'Mesero'),
-  patchNotaCocina
-);
+// El mesero entregó una ronda concreta
+comandasRouter.post('/:id/despachada', entrega, postMarcarDespachada);
