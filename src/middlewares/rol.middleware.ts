@@ -31,10 +31,15 @@ export function requireRol(...rolesPermitidos: RolSistema[]) {
 }
 
 // Shortcut — el administrador siempre tiene acceso a todo
-export function requireAdmin(req: Request, res: Response, next: NextFunction): void {
-  if (req.usuario?.rolNombre !== 'Administrador') {
+export function requireAdmin(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void {
+  if (req.usuario?.rol !== 'Administrador') {
     respond.forbidden(res, 'Solo el administrador puede realizar esta acción');
     return;
   }
+
   next();
 }
