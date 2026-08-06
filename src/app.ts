@@ -26,6 +26,8 @@ import { turnosRouter }   from './modules/turnos/turnos.router';
 import { telemetriaRouter } from './modules/telemetria/telemetria.router';
 import { reportesRouter } from './modules/reportes/reportes.router';
 import { seguimientoRouter } from './modules/seguimiento/seguimiento.router';
+import { clientesRouter } from './modules/clientes/clientes.router';
+import { domiciliosRouter } from './modules/domicilios/domicilios.router';
 
 const app = express();
 const httpServer = createServer(app);
@@ -93,6 +95,8 @@ app.use('/api/turnos',turnosRouter);
 app.use('/api/telemetria', telemetriaRouter);
 app.use('/api/reportes', reportesRouter);
 app.use('/api/seguimiento', seguimientoRouter);
+app.use('/api/clientes', clientesRouter);
+app.use('/api/domicilios', domiciliosRouter);
 
 // ── 404 para rutas no encontradas ───────────────────
 app.use((_req, res) => {

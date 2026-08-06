@@ -64,7 +64,10 @@ async function siguienteNumeroPedido(): Promise<number> {
 }
 
 // Lee precio de venta del sistema existente — ya incluye IVA
-async function obtenerPrecioArticulo(articuloID: number): Promise<{
+// Exportada: el módulo de domicilios arma sus líneas con el mismo
+// motor de precios que usa abrirPedido, para no duplicar la lógica
+// ni arriesgarse a que un domicilio cobre distinto que una mesa.
+export async function obtenerPrecioArticulo(articuloID: number): Promise<{
   nombre:      string;
   precioVenta: number;
 }> {
