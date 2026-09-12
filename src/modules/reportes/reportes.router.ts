@@ -24,36 +24,40 @@ export const reportesRouter = Router();
 
 reportesRouter.use(authMiddleware);
 
-const rolesReporte = requireRol('Administrador', 'Cajero');
+// El cajero solo puede buscar un pedido puntual (p. ej. para resolver un
+// reclamo). Ventas por período, meseros, productos, métodos de pago y
+// canales son cifras del negocio completo: eso queda para el dueño.
+const soloAdmin = requireRol('Administrador');
+const rolesPedidos = requireRol('Administrador', 'Cajero');
 
 // ── Portada ──────────────────────────────────────────
 // GET /reportes/resumen?desde=YYYY-MM-DD&hasta=YYYY-MM-DD
-reportesRouter.get('/resumen', rolesReporte, getResumenPeriodo);
+reportesRouter.get('/resumen', soloAdmin, getResumenPeriodo);
 
 // GET /reportes/hoy
-reportesRouter.get('/hoy', rolesReporte, getResumenHoy);
+reportesRouter.get('/hoy', soloAdmin, getResumenHoy);
 
 // ── Ventas ───────────────────────────────────────────
-reportesRouter.get('/ventas/dias', rolesReporte, getVentasPorDia);
-reportesRouter.get('/ventas/horas', rolesReporte, getVentasPorHora);
-reportesRouter.get('/ventas/diarias', rolesReporte, getVentasDiarias);
-reportesRouter.get('/ventas/mensuales', rolesReporte, getVentasMensuales);
-reportesRouter.get('/ventas/anuales', rolesReporte, getVentasAnuales);
+reportesRouter.get('/ventas/dias', soloAdmin, getVentasPorDia);
+reportesRouter.get('/ventas/horas', soloAdmin, getVentasPorHora);
+reportesRouter.get('/ventas/diarias', soloAdmin, getVentasDiarias);
+reportesRouter.get('/ventas/mensuales', soloAdmin, getVentasMensuales);
+reportesRouter.get('/ventas/anuales', soloAdmin, getVentasAnuales);
 
 // ── Métodos de pago ──────────────────────────────────
-reportesRouter.get('/metodos-pago', rolesReporte, getMetodosPago);
+reportesRouter.get('/metodos-pago', soloAdmin, getMetodosPago);
 
 // ── Canales de venta: Mesa / Para Llevar / Domicilio ─
-reportesRouter.get('/canales', rolesReporte, getCanales);
+reportesRouter.get('/canales', soloAdmin, getCanales);
 
 // ── Meseros ──────────────────────────────────────────
-reportesRouter.get('/meseros', rolesReporte, getMeseros);
-reportesRouter.get('/meseros/:id/pedidos', rolesReporte, getDetalleMesero);
+reportesRouter.get('/meseros', soloAdmin, getMeseros);
+reportesRouter.get('/meseros/:id/pedidos', soloAdmin, getDetalleMesero);
 
 // ── Productos ─────────────────────────────────────────
-reportesRouter.get('/productos', rolesReporte, getProductos);
+reportesRouter.get('/productos', soloAdmin, getProductos);
 
 // ── Pedidos ───────────────────────────────────────────
 // El listado va antes que '/pedidos/:id' para que no lo capture.
-reportesRouter.get('/pedidos', rolesReporte, getBuscarPedidos);
-reportesRouter.get('/pedidos/:id', rolesReporte, getDetallePedido);
+reportesRouter.get('/pedidos', rolesPedidos, getBuscarPedidos);
+reportesRouter.get('/pedidos/:id', rolesPedidos, getDetallePedido);

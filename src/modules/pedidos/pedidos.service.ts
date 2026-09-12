@@ -733,6 +733,22 @@ export async function cancelarPedido(
   if (pedido.estadoPedido === 'Pagado')
     throw new AppError('No se puede cancelar un pedido ya pagado', 409);
 
+  // Un pedido con pagos ya registrados (abono parcial, fiado) no se puede
+  // cancelar de un tirón: ese dinero quedaría cobrado sobre un pedido que
+  // ya no existe. Primero hay que anular esos pagos.
+  const pagos = await query<{ pagado: number }>(`
+    SELECT ISNULL(SUM(pa.MontoPagado - pa.Vuelto), 0) AS pagado
+    FROM modu_rest_Pagos pa
+    WHERE pa.PedidoID = @pedidoID AND pa.Anulado = 0
+  `, (req) => {
+    req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
+  });
+
+  if (pagos[0].pagado > 0)
+    throw new AppError(
+      'Este pedido ya tiene pagos registrados. Anúlalos antes de cancelar el pedido.',
+      409);
+
   await query(`
     UPDATE modu_rest_Pedidos
     SET EstadoPedido = 'Cancelado', FechaCierre = SYSUTCDATETIME()

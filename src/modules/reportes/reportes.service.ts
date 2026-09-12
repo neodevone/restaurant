@@ -692,9 +692,13 @@ export async function detalleCompletoPedido(pedidoID: string) {
       cd.EstadoItem           AS estadoItem,
       cd.NotasEspeciales      AS notasEspeciales,
       cd.HoraPedido           AS horaPedido,
-      c.NumeroRonda           AS numeroRonda
+      c.NumeroRonda           AS numeroRonda,
+      cd.MotivoCancelacion    AS motivoCancelacion,
+      cd.FechaCancelacion     AS fechaCancelacion,
+      ISNULL(uc.Nombre + ' ' + uc.Apellido, NULL) AS canceladoPor
     FROM modu_rest_ComandaDetalle cd
     LEFT JOIN modu_rest_Comandas c ON cd.ComandaID = c.ComandaID
+    LEFT JOIN modu_rest_Usuarios uc ON cd.CanceladoPor = uc.UsuarioID
     WHERE cd.PedidoID = @pedidoID
     ORDER BY cd.HoraPedido, cd.NombreArticulo
   `, (req) => {

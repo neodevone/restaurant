@@ -2,6 +2,7 @@
 
 import { query, sql } from '../../config/database';
 import { AppError } from '../../middlewares/error.middleware';
+import { emitirEventoMultiple, ROOMS, EVENTOS_SOCKET } from '../../sockets/socket.manager';
 
 // ── Interfaces ───────────────────────────────────────
 
@@ -297,7 +298,29 @@ export async function cambiarEstadoMesa(
     req.input('mesaID', sql.UniqueIdentifier, mesaID);
   });
 
-  return obtenerMesa(mesaID);
+  const mesa = await obtenerMesa(mesaID);
+
+  // Único punto de cambio de estado de mesa: cancelar un pedido, cobrar,
+  // pedir la cuenta o abrir un pedido nuevo pasan todos por acá. Emitir
+  // aquí (en vez de en cada acción que llama a esta función) es lo que
+  // hace que el mapa de mesas del mesero se entere en el momento — antes
+  // no se avisaba a nadie y solo se enteraban al volver a esa pantalla.
+  //
+  // La forma del payload (mesaID/mesaAlias/nuevoEstadoMesa) no es la que
+  // usa este servicio (mesaID/alias/estado): es la que ya espera el
+  // cliente (app/src/store/socket.store.ts). Mandar el objeto Mesa tal
+  // cual habría dejado nuevoEstadoMesa en undefined del otro lado.
+  //
+  // A las dos rooms: SALA para la app del mesero, CAJA para el mapa de
+  // mesas del escritorio — antes el escritorio solo se enteraba de un
+  // pedido nuevo cuando su temporizador de 15s volvía a consultar.
+  emitirEventoMultiple([ROOMS.SALA, ROOMS.CAJA], EVENTOS_SOCKET.MESA_ACTUALIZADA, {
+    mesaID: mesa.mesaID,
+    mesaAlias: mesa.alias,
+    nuevoEstadoMesa: mesa.estado,
+  });
+
+  return mesa;
 }
 
 export async function toggleMesa(mesaID: string, activa: boolean): Promise<void> {

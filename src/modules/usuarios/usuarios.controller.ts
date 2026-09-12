@@ -49,9 +49,14 @@ const passwordSchema = Joi.object({
   }),
 });
 
+// Un cajero puede ver la lista para ubicar a un mesero, pero las cuentas
+// de administrador no son asunto suyo — ni su usuario, ni su PIN, ni
+// cuándo entraron por última vez.
 export async function listar(req: Request, res: Response, next: NextFunction) {
   try {
-    const usuarios = await listarUsuarios();
+    let usuarios = await listarUsuarios();
+    if (req.usuario?.rol !== 'Administrador')
+      usuarios = usuarios.filter(u => u.rol !== 'Administrador');
     respond.ok(res, usuarios);
   } catch (err) { next(err); }
 }
@@ -59,6 +64,10 @@ export async function listar(req: Request, res: Response, next: NextFunction) {
 export async function obtener(req: Request, res: Response, next: NextFunction) {
   try {
     const usuario = await obtenerUsuario(req.params.id as string);
+    if (usuario.rol === 'Administrador' && req.usuario?.rol !== 'Administrador') {
+      respond.forbidden(res, 'No autorizado para ver esta cuenta');
+      return;
+    }
     respond.ok(res, usuario);
   } catch (err) { next(err); }
 }
