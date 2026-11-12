@@ -388,86 +388,160 @@ export async function abrirPedido(
 
 // ── Agregar ronda ─────────────────────────────────────
 
+// Ventana para considerar una ronda idéntica como envío repetido
+// (doble toque en "Enviar" o reintento de la app con mala señal).
+export const VENTANA_RONDA_DUPLICADA_MS = 10_000;
+
+// Firma de una ronda: artículos + cantidades + notas, sin importar el orden.
+function firmaRonda(items: { articuloID: number; cantidad: number; notasEspeciales?: string | null }[]): string {
+  return items
+    .map(i => `${i.articuloID}|${Number(i.cantidad)}|${(i.notasEspeciales ?? '').trim()}`)
+    .sort()
+    .join(';');
+}
+
 export async function agregarRonda(
   pedidoID: string,
   meseroID: string,
   items: ItemPedido[]
 ): Promise<{ pedido: Pedido; comandaID: string; numeroRonda: number }> {
 
+  // Validación rápida (404 / estado) antes de abrir la transacción
   const pedido = await obtenerPedido(pedidoID);
-
   if (pedido.estadoPedido !== 'Abierto')
     throw new AppError('No se pueden agregar ítems a un pedido que no está abierto', 409);
 
-  const rondasRows = await query<{ totalRondas: number }>(`
-    SELECT COUNT(*) AS totalRondas
-    FROM modu_rest_Comandas
-    WHERE PedidoID = @pedidoID
-  `, (req) => {
-    req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
-  });
-
-  const numeroRonda = rondasRows[0].totalRondas + 1;
-
-  // Calcular sin IVA adicional
-  let subtotalNuevo = 0;
-
+  // Precios fuera de la transacción: solo lecturas. Sin IVA adicional.
   const itemsConPrecio = await Promise.all(
     items.map(async (item) => {
       const art          = await obtenerPrecioArticulo(item.articuloID);
       const itemSubtotal = art.precioVenta * item.cantidad;
-      subtotalNuevo     += itemSubtotal;
       return { ...item, ...art, itemSubtotal };
     })
   );
+  const subtotalNuevo = itemsConPrecio.reduce((acc, i) => acc + i.itemSubtotal, 0);
 
-  const comandaRows = await query<{ ComandaID: string }>(`
-    INSERT INTO modu_rest_Comandas (PedidoID, NumeroRonda, Estado)
-    OUTPUT INSERTED.ComandaID
-    VALUES (@pedidoID, @numeroRonda, 'Pendiente')
-  `, (req) => {
-    req.input('pedidoID',    sql.UniqueIdentifier, pedidoID);
-    req.input('numeroRonda', sql.Int,              numeroRonda);
-  });
+  // Antes cada paso era una consulta suelta: dos POST casi simultáneos
+  // (doble toque, reintento) contaban las mismas rondas, insertaban dos
+  // comandas con el mismo NumeroRonda y sumaban el total dos veces.
+  // En producción hubo rondas repetidas hasta 4 veces con 0-5 ms de
+  // diferencia, varias ya despachadas y cobradas.
+  //
+  // UPDLOCK + HOLDLOCK sobre la fila del pedido serializa las rondas de
+  // un mismo pedido. Dentro del bloqueo se rechaza una ronda idéntica a
+  // la última si llegó hace menos de VENTANA_RONDA_DUPLICADA_MS.
+  const pool = await getPool();
+  const tx   = new sql.Transaction(pool);
+  await tx.begin(sql.ISOLATION_LEVEL.READ_COMMITTED);
 
-  const comandaID = comandaRows[0].ComandaID;
+  let comandaID: string;
+  let numeroRonda: number;
 
-  for (const item of itemsConPrecio) {
-    await query(`
-      INSERT INTO modu_rest_ComandaDetalle (
-        ComandaID, PedidoID, IdArticulo, NombreArticulo,
-        Cantidad, PrecioVentaHistorico,
-        PorcentajeIVA, MontoIVA, MontoDescuento,
-        Subtotal, EstadoItem, NotasEspeciales
-      )
-      VALUES (
-        @comandaID, @pedidoID, @articuloID, @nombreArticulo,
-        @cantidad, @precioVenta,
-        0, 0, 0,
-        @subtotal, 'Pendiente', @notasEspeciales
-      )
-    `, (req) => {
-      req.input('comandaID',       sql.UniqueIdentifier, comandaID);
-      req.input('pedidoID',        sql.UniqueIdentifier, pedidoID);
-      req.input('articuloID',      sql.Int,              item.articuloID);
-      req.input('nombreArticulo',  sql.NVarChar,         item.nombre);
-      req.input('cantidad',        sql.Decimal(10, 2),   item.cantidad);
-      req.input('precioVenta',     sql.Decimal(18, 2),   item.precioVenta);
-      req.input('subtotal',        sql.Decimal(18, 2),   item.itemSubtotal);
-      req.input('notasEspeciales', sql.NVarChar,         item.notasEspeciales ?? null);
-    });
+  try {
+    const bloqueo = await new sql.Request(tx)
+      .input('pedidoID', sql.UniqueIdentifier, pedidoID)
+      .query(`
+        SELECT EstadoPedido AS estadoPedido
+        FROM modu_rest_Pedidos WITH (UPDLOCK, HOLDLOCK)
+        WHERE PedidoID = @pedidoID
+      `);
+    if (bloqueo.recordset.length === 0)
+      throw new AppError('Pedido no encontrado', 404);
+    // Se vuelve a mirar ya con el bloqueo: pudo cobrarse o cancelarse
+    // entre la validación de arriba y este punto.
+    if (bloqueo.recordset[0].estadoPedido !== 'Abierto')
+      throw new AppError('No se pueden agregar ítems a un pedido que no está abierto', 409);
+
+    // Última ronda del pedido y hace cuánto llegó
+    const ultima = await new sql.Request(tx)
+      .input('pedidoID', sql.UniqueIdentifier, pedidoID)
+      .query(`
+        SELECT TOP 1
+          c.ComandaID   AS comandaID,
+          c.NumeroRonda AS numeroRonda,
+          DATEDIFF(MILLISECOND, c.HoraEnviada, SYSUTCDATETIME()) AS msDesde
+        FROM modu_rest_Comandas c
+        WHERE c.PedidoID = @pedidoID
+        ORDER BY c.HoraEnviada DESC, c.NumeroRonda DESC
+      `);
+
+    const u = ultima.recordset[0];
+    if (u && u.msDesde < VENTANA_RONDA_DUPLICADA_MS) {
+      const detUltima = await new sql.Request(tx)
+        .input('comandaID', sql.UniqueIdentifier, u.comandaID)
+        .query(`
+          SELECT IdArticulo AS articuloID, Cantidad AS cantidad,
+                 NotasEspeciales AS notasEspeciales
+          FROM modu_rest_ComandaDetalle
+          WHERE ComandaID = @comandaID
+        `);
+      if (firmaRonda(detUltima.recordset) === firmaRonda(items))
+        throw new AppError(
+          `Esta ronda ya fue enviada hace ${Math.max(1, Math.round(u.msDesde / 1000))} s ` +
+          `(ronda #${u.numeroRonda}). Si de verdad quieres repetirla, espera unos segundos.`,
+          409);
+    }
+
+    const max = await new sql.Request(tx)
+      .input('pedidoID', sql.UniqueIdentifier, pedidoID)
+      .query(`
+        SELECT ISNULL(MAX(NumeroRonda), 0) + 1 AS siguiente
+        FROM modu_rest_Comandas WHERE PedidoID = @pedidoID
+      `);
+    numeroRonda = max.recordset[0].siguiente;
+
+    const comandaRows = await new sql.Request(tx)
+      .input('pedidoID',    sql.UniqueIdentifier, pedidoID)
+      .input('numeroRonda', sql.Int,              numeroRonda)
+      .query(`
+        INSERT INTO modu_rest_Comandas (PedidoID, NumeroRonda, Estado)
+        OUTPUT INSERTED.ComandaID
+        VALUES (@pedidoID, @numeroRonda, 'Pendiente')
+      `);
+    comandaID = comandaRows.recordset[0].ComandaID;
+
+    for (const item of itemsConPrecio) {
+      await new sql.Request(tx)
+        .input('comandaID',       sql.UniqueIdentifier, comandaID)
+        .input('pedidoID',        sql.UniqueIdentifier, pedidoID)
+        .input('articuloID',      sql.Int,              item.articuloID)
+        .input('nombreArticulo',  sql.NVarChar,         item.nombre)
+        .input('cantidad',        sql.Decimal(10, 2),   item.cantidad)
+        .input('precioVenta',     sql.Decimal(18, 2),   item.precioVenta)
+        .input('subtotal',        sql.Decimal(18, 2),   item.itemSubtotal)
+        .input('notasEspeciales', sql.NVarChar,         item.notasEspeciales ?? null)
+        .query(`
+          INSERT INTO modu_rest_ComandaDetalle (
+            ComandaID, PedidoID, IdArticulo, NombreArticulo,
+            Cantidad, PrecioVentaHistorico,
+            PorcentajeIVA, MontoIVA, MontoDescuento,
+            Subtotal, EstadoItem, NotasEspeciales
+          )
+          VALUES (
+            @comandaID, @pedidoID, @articuloID, @nombreArticulo,
+            @cantidad, @precioVenta,
+            0, 0, 0,
+            @subtotal, 'Pendiente', @notasEspeciales
+          )
+        `);
+    }
+
+    // Actualizar totales — solo sumar subtotal, sin IVA
+    await new sql.Request(tx)
+      .input('pedidoID',      sql.UniqueIdentifier, pedidoID)
+      .input('subtotalNuevo', sql.Decimal(18, 2),   subtotalNuevo)
+      .query(`
+        UPDATE modu_rest_Pedidos SET
+          Subtotal    = Subtotal    + @subtotalNuevo,
+          TotalCuenta = TotalCuenta + @subtotalNuevo
+        WHERE PedidoID = @pedidoID
+      `);
+
+    await tx.commit();
+  } catch (err) {
+    try { await tx.rollback(); } catch { /* ya abortada por SQL Server */ }
+    throw err;
   }
-
-  // Actualizar totales — solo sumar subtotal, sin IVA
-  await query(`
-    UPDATE modu_rest_Pedidos SET
-      Subtotal    = Subtotal    + @subtotalNuevo,
-      TotalCuenta = TotalCuenta + @subtotalNuevo
-    WHERE PedidoID = @pedidoID
-  `, (req) => {
-    req.input('pedidoID',      sql.UniqueIdentifier, pedidoID);
-    req.input('subtotalNuevo', sql.Decimal(18, 2),   subtotalNuevo);
-  });
 
   const pedidoActualizado = await obtenerPedido(pedidoID);
   return { pedido: pedidoActualizado, comandaID, numeroRonda };
