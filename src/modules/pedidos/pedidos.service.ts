@@ -48,6 +48,7 @@ export interface AbrirPedidoDTO {
   numeroPersonas?: number;
   notasGenerales?: string;
   items:           ItemPedido[];
+  idEnvio?:        string;   // UUID del envío (la app lo reutiliza al reintentar)
 }
 
 // Estados en los que todavía se puede modificar el contenido del pedido
@@ -280,12 +281,76 @@ export async function listarPedidos(filtros: {
   });
 }
 
+// ── Identificador de envío (idempotencia) ─────────────
+//
+// La app genera un idEnvio (UUID) cada vez que el mesero toca "Enviar" y
+// lo REUTILIZA en los reintentos de ese mismo envío (timeout, mala señal,
+// doble toque). Se guarda en modu_rest_Comandas.IdEnvio con un índice
+// único filtrado. Si llega un idEnvio que ya existe, no se crea nada: se
+// responde con lo que ya quedó registrado (repetido: true). Así un
+// reintento NUNCA duplica, sin importar cuánto tarde.
+//
+// Clientes que no mandan idEnvio (escritorio) siguen protegidos por la
+// transacción y la ventana antiduplicado de rondas.
+//
+// La columna la crea sql/2026-11-13_idenvio_comandas.sql. Si todavía no
+// existe, la API ignora el idEnvio (se revisa cada minuto), así que el
+// orden de despliegue API/SQL no rompe nada.
+
+let idEnvioDisponible: boolean | null = null;
+let idEnvioRevisadoEn = 0;
+
+async function soportaIdEnvio(): Promise<boolean> {
+  if (idEnvioDisponible === true) return true;
+  if (idEnvioDisponible === false && Date.now() - idEnvioRevisadoEn < 60_000) return false;
+  const r = await query<{ largo: number | null }>(
+    `SELECT COL_LENGTH('dbo.modu_rest_Comandas', 'IdEnvio') AS largo`
+  );
+  idEnvioDisponible = r[0]?.largo != null;
+  idEnvioRevisadoEn = Date.now();
+  if (!idEnvioDisponible)
+    console.log('[AVISO] modu_rest_Comandas.IdEnvio no existe todavía: se ignora el idEnvio (ver sql/2026-11-13_idenvio_comandas.sql)');
+  return idEnvioDisponible;
+}
+
+interface EnvioRegistrado { pedidoID: string; comandaID: string; numeroRonda: number }
+
+async function buscarEnvio(idEnvio: string, tx?: sql.Transaction): Promise<EnvioRegistrado | null> {
+  const req = tx ? new sql.Request(tx) : (await getPool()).request();
+  const r = await req
+    .input('idEnvio', sql.UniqueIdentifier, idEnvio)
+    .query(`
+      SELECT PedidoID AS pedidoID, ComandaID AS comandaID, NumeroRonda AS numeroRonda
+      FROM modu_rest_Comandas
+      WHERE IdEnvio = @idEnvio
+    `);
+  return r.recordset[0] ?? null;
+}
+
+/** 2601/2627 sobre el índice de IdEnvio: otra petición con el mismo envío ganó la carrera. */
+function esEnvioDuplicado(err: unknown): boolean {
+  const e = err as { number?: number; message?: string; originalError?: { info?: { number?: number; message?: string } } };
+  const num = e?.number ?? e?.originalError?.info?.number;
+  const msg = `${e?.message ?? ''} ${e?.originalError?.info?.message ?? ''}`;
+  return (num === 2601 || num === 2627) && msg.includes('UX_modu_rest_Comandas_IdEnvio');
+}
+
+const mismoID = (a: string, b: string) => a.toUpperCase() === b.toUpperCase();
+
 // ── Abrir pedido ──────────────────────────────────────
 
 export async function abrirPedido(
   meseroID: string,
   data: AbrirPedidoDTO
-): Promise<Pedido> {
+): Promise<Pedido & { repetido?: boolean }> {
+
+  // 0. ¿Este envío ya se registró? (reintento de la app) → devolver lo
+  //    que ya existe, aunque la mesa ya figure ocupada por ese mismo pedido.
+  const usarIdEnvio = !!data.idEnvio && await soportaIdEnvio();
+  if (usarIdEnvio) {
+    const previo = await buscarEnvio(data.idEnvio!);
+    if (previo) return { ...(await obtenerPedido(previo.pedidoID)), repetido: true };
+  }
 
   // 1. Precios fuera de la transacción: son solo lecturas y así la
   //    transacción (y el bloqueo de la mesa) dura lo mínimo.
@@ -329,6 +394,16 @@ export async function abrirPedido(
         `);
       if (bloqueo.recordset.length === 0)
         throw new AppError('Mesa no encontrada', 404);
+
+      // Con la mesa ya bloqueada: si un reintento del mismo envío ganó
+      // mientras esperábamos, devolver ese pedido en vez de "mesa ocupada".
+      if (usarIdEnvio) {
+        const previo = await buscarEnvio(data.idEnvio!, tx);
+        if (previo) {
+          await tx.rollback();
+          return { ...(await obtenerPedido(previo.pedidoID)), repetido: true };
+        }
+      }
 
       const ocupada = await new sql.Request(tx)
         .input('mesaID', sql.UniqueIdentifier, data.mesaID)
@@ -382,7 +457,12 @@ export async function abrirPedido(
 
     const comandaRows = await new sql.Request(tx)
       .input('pedidoID', sql.UniqueIdentifier, pedidoID)
-      .query(`
+      .input('idEnvio',  sql.UniqueIdentifier, usarIdEnvio ? data.idEnvio : null)
+      .query(usarIdEnvio ? `
+        INSERT INTO modu_rest_Comandas (PedidoID, NumeroRonda, Estado, IdEnvio)
+        OUTPUT INSERTED.ComandaID
+        VALUES (@pedidoID, 1, 'Pendiente', @idEnvio)
+      ` : `
         INSERT INTO modu_rest_Comandas (PedidoID, NumeroRonda, Estado)
         OUTPUT INSERTED.ComandaID
         VALUES (@pedidoID, 1, 'Pendiente')
@@ -419,6 +499,13 @@ export async function abrirPedido(
     await tx.commit();
   } catch (err) {
     try { await tx.rollback(); } catch { /* ya abortada por SQL Server */ }
+
+    // Mismo idEnvio insertado por otra petición en paralelo (pedidos sin
+    // mesa no tienen bloqueo de mesa): devolver el que ganó.
+    if (usarIdEnvio && esEnvioDuplicado(err)) {
+      const previo = await buscarEnvio(data.idEnvio!);
+      if (previo) return { ...(await obtenerPedido(previo.pedidoID)), repetido: true };
+    }
 
     // 2601/2627: violación del índice único → otra petición ganó la carrera
     const num = (err as { number?: number })?.number
@@ -486,8 +573,23 @@ function firmaRonda(items: { articuloID: number; cantidad: number; notasEspecial
 export async function agregarRonda(
   pedidoID: string,
   meseroID: string,
-  items: ItemPedido[]
-): Promise<{ pedido: Pedido; comandaID: string; numeroRonda: number }> {
+  items: ItemPedido[],
+  idEnvio?: string
+): Promise<{ pedido: Pedido; comandaID: string; numeroRonda: number; repetido?: boolean }> {
+
+  // ¿Este envío ya se registró? (reintento de la app). Va ANTES de mirar
+  // el estado: si la ronda entró y luego se cobró la cuenta, el reintento
+  // debe confirmar que quedó registrada, no decir "pedido cerrado".
+  const usarIdEnvio = !!idEnvio && await soportaIdEnvio();
+  const respuestaRepetida = async (previo: EnvioRegistrado) => {
+    if (!mismoID(previo.pedidoID, pedidoID))
+      throw new AppError('Este envío ya se registró en otro pedido', 409);
+    return { pedido: await obtenerPedido(pedidoID), comandaID: previo.comandaID, numeroRonda: previo.numeroRonda, repetido: true };
+  };
+  if (usarIdEnvio) {
+    const previo = await buscarEnvio(idEnvio!);
+    if (previo) return respuestaRepetida(previo);
+  }
 
   // Validación rápida (404 / estado) antes de abrir la transacción
   const pedido = await obtenerPedido(pedidoID);
@@ -531,6 +633,15 @@ export async function agregarRonda(
       `);
     if (bloqueo.recordset.length === 0)
       throw new AppError('Pedido no encontrado', 404);
+    // Con el pedido bloqueado: si un reintento del mismo envío ganó
+    // mientras esperábamos, confirmar esa ronda en vez de crear otra.
+    if (usarIdEnvio) {
+      const previo = await buscarEnvio(idEnvio!, tx);
+      if (previo) {
+        await tx.rollback();
+        return respuestaRepetida(previo);
+      }
+    }
     // Se vuelve a mirar ya con el bloqueo: pudo cobrarse o cancelarse
     // entre la validación de arriba y este punto.
     if (bloqueo.recordset[0].estadoPedido !== 'Abierto')
@@ -586,7 +697,12 @@ export async function agregarRonda(
     const comandaRows = await new sql.Request(tx)
       .input('pedidoID',    sql.UniqueIdentifier, pedidoID)
       .input('numeroRonda', sql.Int,              numeroRonda)
-      .query(`
+      .input('idEnvio',     sql.UniqueIdentifier, usarIdEnvio ? idEnvio : null)
+      .query(usarIdEnvio ? `
+        INSERT INTO modu_rest_Comandas (PedidoID, NumeroRonda, Estado, IdEnvio)
+        OUTPUT INSERTED.ComandaID
+        VALUES (@pedidoID, @numeroRonda, 'Pendiente', @idEnvio)
+      ` : `
         INSERT INTO modu_rest_Comandas (PedidoID, NumeroRonda, Estado)
         OUTPUT INSERTED.ComandaID
         VALUES (@pedidoID, @numeroRonda, 'Pendiente')
@@ -633,6 +749,10 @@ export async function agregarRonda(
     await tx.commit();
   } catch (err) {
     try { await tx.rollback(); } catch { /* ya abortada por SQL Server */ }
+    if (usarIdEnvio && esEnvioDuplicado(err)) {
+      const previo = await buscarEnvio(idEnvio!);
+      if (previo) return respuestaRepetida(previo);
+    }
     throw err;
   }
 

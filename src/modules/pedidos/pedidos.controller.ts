@@ -23,6 +23,8 @@ const abrirPedidoSchema = Joi.object({
   nombreCliente:  Joi.string().max(100).optional(),
   numeroPersonas: Joi.number().integer().min(1).optional(),
   notasGenerales: Joi.string().max(500).optional(),
+  // UUID del envío: la app lo reutiliza al reintentar para no duplicar
+  idEnvio:        Joi.string().uuid().optional(),
   items: Joi.array().items(itemSchema).min(1).required().messages({
     'array.min': 'Debes agregar al menos un artículo al pedido',
     'any.required': 'Los ítems del pedido son requeridos',
@@ -30,6 +32,7 @@ const abrirPedidoSchema = Joi.object({
 });
 
 const rondaSchema = Joi.object({
+  idEnvio: Joi.string().uuid().optional(),
   items: Joi.array().items(itemSchema).min(1).required().messages({
     'array.min': 'Debes agregar al menos un artículo a la ronda',
   }),
@@ -100,7 +103,11 @@ export async function postAbrirPedido(
     if (error) { respond.badRequest(res, error.details[0].message); return; }
 
     const pedido = await abrirPedido(req.usuario!.usuarioID, value);
-    respond.created(res, pedido, `Pedido #${pedido.numeroPedido} tomado correctamente`);
+    // Reintento de un envío que ya quedó registrado: 200 con el mismo pedido
+    if (pedido.repetido)
+      respond.ok(res, pedido, `El pedido #${pedido.numeroPedido} ya estaba registrado`);
+    else
+      respond.created(res, pedido, `Pedido #${pedido.numeroPedido} tomado correctamente`);
   } catch (err) { next(err); }
 }
 
@@ -114,9 +121,13 @@ export async function postAgregarRonda(
     const result = await agregarRonda(
       req.params.id as string,
       req.usuario!.usuarioID,
-      value.items
+      value.items,
+      value.idEnvio
     );
-    respond.created(res, result, `Ronda #${result.numeroRonda} agregada correctamente`);
+    if (result.repetido)
+      respond.ok(res, result, `La ronda #${result.numeroRonda} ya estaba registrada`);
+    else
+      respond.created(res, result, `Ronda #${result.numeroRonda} agregada correctamente`);
   } catch (err) { next(err); }
 }
 
