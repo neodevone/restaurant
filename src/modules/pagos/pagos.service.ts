@@ -495,39 +495,8 @@ export async function registrarCuentaPorCobrar(
   data: RegistrarFiadoDTO
 ): Promise<{ pago: Pago; resumen: PagoResumen }> {
 
-  // 1. Verificar pedido
-  const pedidoRows = await query<{
-    pedidoID:     string;
-    mesaID:       string | null;
-    totalCuenta:  number;
-    estadoPedido: string;
-    mesaAlias:    string | null;
-    numeroPedido: number;
-    tipoPedido:   string;
-  }>(`
-    SELECT
-      p.PedidoID      AS pedidoID,
-      p.MesaID        AS mesaID,
-      p.TotalCuenta   AS totalCuenta,
-      p.EstadoPedido  AS estadoPedido,
-      p.NumeroPedido  AS numeroPedido,
-      p.TipoPedido    AS tipoPedido,
-      m.Alias         AS mesaAlias
-    FROM modu_rest_Pedidos p
-    LEFT JOIN modu_rest_Mesas m ON p.MesaID = m.MesaID
-    WHERE p.PedidoID = @pedidoID
-  `, (req) => {
-    req.input('pedidoID', sql.UniqueIdentifier, data.pedidoID);
-  });
-
-  if (pedidoRows.length === 0) throw new AppError('Pedido no encontrado', 404);
-
-  const pedido = pedidoRows[0];
-
-  if (!['Abierto', 'Por Pagar'].includes(pedido.estadoPedido))
-    throw new AppError('Este pedido no está disponible para fiar', 409);
-
-  // 2. Verificar que el método sea de tipo Crédito
+  // Verificar que el método sea de tipo Crédito (solo lectura de un
+  // catálogo: va antes de abrir la transacción).
   const metodoRows = await query<{ tipo: string; nombre: string }>(`
     SELECT Tipo AS tipo, Nombre AS nombre
     FROM modu_rest_MetodosPago
@@ -542,92 +511,154 @@ export async function registrarCuentaPorCobrar(
   if (metodoRows[0].tipo !== 'Credito')
     throw new AppError('El método seleccionado no es una cuenta por cobrar', 400);
 
+  // Todo el fiado corre en UNA transacción con UPDLOCK + HOLDLOCK sobre
+  // el pedido — el mismo bloqueo de registrarPago, agregarRonda y
+  // cancelarPedido. Antes, dos "fiar" simultáneos creaban dos deudas del
+  // mismo pedido, y una ronda que entraba a la vez quedaba pendiente en
+  // un pedido ya Fiado con la deuda calculada sin ella (QA r2: X1, X2).
+  const pool = await getPool();
+  const tx   = new sql.Transaction(pool);
+  await tx.begin(sql.ISOLATION_LEVEL.READ_COMMITTED);
 
-  // No se cobra una mesa cuya comida todavía no se entregó. La regla
-  // vive aquí y no solo en el botón del escritorio: un botón
-  // deshabilitado se salta por cualquier otro camino.
-  //
-  // Solo aplica a pedidos CON mesa. Mostrador y domicilios se cobran
-  // en el momento y sus comandas nacen despachadas.
-  if (pedido.mesaID) {
-    const pendientes = await comandasPendientesPedido(data.pedidoID);
-    if (pendientes > 0) {
-      throw new AppError(
-        `Este pedido todavía no se ha entregado en la mesa. ` +
-        `Falta(n) ${pendientes} ronda(s) por entregar.`,
-        409);
-    }
-  }
-
-  // El fiado no mueve efectivo, pero pertenece al turno: es una venta
-  // del período y tiene que aparecer en el cierre.
-  const turnoID = await exigirTurnoAbierto();
-
-  // 3. El saldo que queda es la deuda
-  const deuda = await saldoPendienteDe(data.pedidoID, pedido.totalCuenta);
-
-  if (deuda <= 0)
-    throw new AppError('Este pedido ya está completamente pagado', 409);
-
-  // 3b. Sincronizar el canal de venta elegido por el cajero
-  if (data.tipoPedido && data.tipoPedido !== pedido.tipoPedido) {
-    await query(`
-      UPDATE modu_rest_Pedidos SET TipoPedido = @canal
-      WHERE PedidoID = @pedidoID
-    `, (req) => {
-      req.input('pedidoID', sql.UniqueIdentifier, data.pedidoID);
-      req.input('canal', sql.NVarChar, data.tipoPedido!);
-    });
-    pedido.tipoPedido = data.tipoPedido;
-  }
-
-  // 4. Metadata del crédito
-  const metadataPago: MetadataPago = {
-    tipoPedido:    pedido.tipoPedido as MetadataPago['tipoPedido'],
-    cedula:        data.cedula,
-    celular:       data.celular,
-    nombreCliente: data.nombreCliente ?? undefined,
-    autorizadoPor: data.autorizadoPor ?? undefined,
-    motivo:        data.motivo ?? undefined,
-    estadoCredito: 'PENDIENTE',
+  let pedido: {
+    pedidoID: string; mesaID: string | null; totalCuenta: number;
+    estadoPedido: string; mesaAlias: string | null;
+    numeroPedido: number; tipoPedido: string;
   };
+  let pagoID: string;
+  let deuda: number;
 
-  // 5. Insertar la fila del fiado
-  const pagoRows = await query<{ PagoID: string }>(`
-    INSERT INTO modu_rest_Pagos (
-      PedidoID, MetodoID, CajeroID, TurnoID,
-      MontoPagado, MontoEsperado, Vuelto, Propina,
-      ReferenciaExterna, MetadataPago
-    )
-    OUTPUT INSERTED.PagoID
-    VALUES (
-      @pedidoID, @metodoID, @cajeroID, @turnoID,
-      0, @deuda, 0, 0,
-      @referenciaExterna, @metadataPago
-    )
-  `, (req) => {
-    req.input('pedidoID',          sql.UniqueIdentifier, data.pedidoID);
-    req.input('metodoID',          sql.UniqueIdentifier, data.metodoID);
-    req.input('cajeroID',          sql.UniqueIdentifier, cajeroID);
-    req.input('turnoID',           sql.UniqueIdentifier, turnoID);
-    req.input('deuda',             sql.Decimal(18, 2),   deuda);
-    req.input('referenciaExterna', sql.NVarChar,         data.cedula);
-    req.input('metadataPago',      sql.NVarChar,         JSON.stringify(metadataPago));
-  });
+  try {
+    // 1. Verificar pedido (con bloqueo)
+    const pedidoRows = await new sql.Request(tx)
+      .input('pedidoID', sql.UniqueIdentifier, data.pedidoID)
+      .query(`
+        SELECT
+          p.PedidoID      AS pedidoID,
+          p.MesaID        AS mesaID,
+          p.TotalCuenta   AS totalCuenta,
+          p.EstadoPedido  AS estadoPedido,
+          p.NumeroPedido  AS numeroPedido,
+          p.TipoPedido    AS tipoPedido,
+          m.Alias         AS mesaAlias
+        FROM modu_rest_Pedidos p WITH (UPDLOCK, HOLDLOCK)
+        LEFT JOIN modu_rest_Mesas m ON p.MesaID = m.MesaID
+        WHERE p.PedidoID = @pedidoID
+      `);
 
-  const pagoID = pagoRows[0].PagoID;
+    if (pedidoRows.recordset.length === 0) throw new AppError('Pedido no encontrado', 404);
 
-  // 6. Cerrar el pedido y liberar la mesa de forma explícita.
-  //    No se deduce de la suma de pagos porque MontoPagado es 0.
-  await query(`
-    UPDATE modu_rest_Pedidos SET
-      EstadoPedido = 'Fiado',
-      FechaCierre  = SYSUTCDATETIME()
-    WHERE PedidoID = @pedidoID
-  `, (req) => {
-    req.input('pedidoID', sql.UniqueIdentifier, data.pedidoID);
-  });
+    pedido = pedidoRows.recordset[0];
 
+    if (!['Abierto', 'Por Pagar'].includes(pedido.estadoPedido))
+      throw new AppError('Este pedido no está disponible para fiar', 409);
+
+    // No se cobra una mesa cuya comida todavía no se entregó. La regla
+    // vive aquí y no solo en el botón del escritorio: un botón
+    // deshabilitado se salta por cualquier otro camino.
+    //
+    // Solo aplica a pedidos CON mesa. Mostrador y domicilios se cobran
+    // en el momento y sus comandas nacen despachadas.
+    if (pedido.mesaID) {
+      const pend = await new sql.Request(tx)
+        .input('pedidoID', sql.UniqueIdentifier, data.pedidoID)
+        .query(`
+          SELECT COUNT(*) AS total
+          FROM modu_rest_Comandas
+          WHERE PedidoID = @pedidoID AND Estado <> 'Despachada'
+        `);
+      const pendientes = pend.recordset[0].total;
+      if (pendientes > 0) {
+        throw new AppError(
+          `Este pedido todavía no se ha entregado en la mesa. ` +
+          `Falta(n) ${pendientes} ronda(s) por entregar.`,
+          409);
+      }
+    }
+
+    // El fiado no mueve efectivo, pero pertenece al turno: es una venta
+    // del período y tiene que aparecer en el cierre.
+    const turnoID = await exigirTurnoAbierto();
+
+    // 3. El saldo que queda es la deuda (dentro del bloqueo: es el real)
+    const pagado = await new sql.Request(tx)
+      .input('pedidoID', sql.UniqueIdentifier, data.pedidoID)
+      .query(`
+        SELECT ISNULL(SUM(MontoPagado), 0) AS totalPagado
+        FROM modu_rest_Pagos
+        WHERE PedidoID = @pedidoID AND Anulado = 0
+      `);
+    deuda = pedido.totalCuenta - pagado.recordset[0].totalPagado;
+
+    if (deuda <= 0)
+      throw new AppError('Este pedido ya está completamente pagado', 409);
+
+    // 3b. Sincronizar el canal de venta elegido por el cajero
+    if (data.tipoPedido && data.tipoPedido !== pedido.tipoPedido) {
+      await new sql.Request(tx)
+        .input('pedidoID', sql.UniqueIdentifier, data.pedidoID)
+        .input('canal',    sql.NVarChar,         data.tipoPedido)
+        .query(`
+          UPDATE modu_rest_Pedidos SET TipoPedido = @canal
+          WHERE PedidoID = @pedidoID
+        `);
+      pedido.tipoPedido = data.tipoPedido;
+    }
+
+    // 4. Metadata del crédito
+    const metadataPago: MetadataPago = {
+      tipoPedido:    pedido.tipoPedido as MetadataPago['tipoPedido'],
+      cedula:        data.cedula,
+      celular:       data.celular,
+      nombreCliente: data.nombreCliente ?? undefined,
+      autorizadoPor: data.autorizadoPor ?? undefined,
+      motivo:        data.motivo ?? undefined,
+      estadoCredito: 'PENDIENTE',
+    };
+
+    // 5. Insertar la fila del fiado
+    const pagoRows = await new sql.Request(tx)
+      .input('pedidoID',          sql.UniqueIdentifier, data.pedidoID)
+      .input('metodoID',          sql.UniqueIdentifier, data.metodoID)
+      .input('cajeroID',          sql.UniqueIdentifier, cajeroID)
+      .input('turnoID',           sql.UniqueIdentifier, turnoID)
+      .input('deuda',             sql.Decimal(18, 2),   deuda)
+      .input('referenciaExterna', sql.NVarChar,         data.cedula)
+      .input('metadataPago',      sql.NVarChar,         JSON.stringify(metadataPago))
+      .query(`
+        INSERT INTO modu_rest_Pagos (
+          PedidoID, MetodoID, CajeroID, TurnoID,
+          MontoPagado, MontoEsperado, Vuelto, Propina,
+          ReferenciaExterna, MetadataPago
+        )
+        OUTPUT INSERTED.PagoID
+        VALUES (
+          @pedidoID, @metodoID, @cajeroID, @turnoID,
+          0, @deuda, 0, 0,
+          @referenciaExterna, @metadataPago
+        )
+      `);
+
+    pagoID = pagoRows.recordset[0].PagoID;
+
+    // 6. Cerrar el pedido de forma explícita.
+    //    No se deduce de la suma de pagos porque MontoPagado es 0.
+    await new sql.Request(tx)
+      .input('pedidoID', sql.UniqueIdentifier, data.pedidoID)
+      .query(`
+        UPDATE modu_rest_Pedidos SET
+          EstadoPedido = 'Fiado',
+          FechaCierre  = SYSUTCDATETIME()
+        WHERE PedidoID = @pedidoID
+      `);
+
+    await tx.commit();
+  } catch (err) {
+    try { await tx.rollback(); } catch { /* ya abortada por SQL Server */ }
+    throw err;
+  }
+
+  // Liberar la mesa después del COMMIT: emite el evento de socket.
   if (pedido.mesaID) {
     await cambiarEstadoMesa(pedido.mesaID, 'Libre');
   }

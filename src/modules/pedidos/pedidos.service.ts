@@ -107,6 +107,74 @@ async function recalcularTotales(pedidoID: string): Promise<number> {
   return rows[0]?.totalCuenta ?? 0;
 }
 
+/**
+ * Corre `fn` dentro de una transacción que tiene bloqueada (UPDLOCK +
+ * HOLDLOCK) la fila del pedido, y verifica dentro del bloqueo que el
+ * pedido siga siendo editable. Es el mismo bloqueo que toman
+ * registrarPago, el fiado, agregarRonda y cancelarPedido: así todo lo
+ * que cambia el total o el estado de un pedido se procesa de a uno.
+ */
+async function conBloqueoPedido<T>(
+  pedidoID: string,
+  fn: (tx: sql.Transaction, pedido: { estadoPedido: string; totalCuenta: number }) => Promise<T>
+): Promise<T> {
+  const pool = await getPool();
+  const tx   = new sql.Transaction(pool);
+  await tx.begin(sql.ISOLATION_LEVEL.READ_COMMITTED);
+  try {
+    const rows = await new sql.Request(tx)
+      .input('pedidoID', sql.UniqueIdentifier, pedidoID)
+      .query(`
+        SELECT EstadoPedido AS estadoPedido, TotalCuenta AS totalCuenta
+        FROM modu_rest_Pedidos WITH (UPDLOCK, HOLDLOCK)
+        WHERE PedidoID = @pedidoID
+      `);
+    if (rows.recordset.length === 0) throw new AppError('Pedido no encontrado', 404);
+
+    const pedido = rows.recordset[0] as { estadoPedido: string; totalCuenta: number };
+    if (!ESTADOS_EDITABLES.includes(pedido.estadoPedido))
+      throw new AppError(`No se puede modificar un pedido en estado ${pedido.estadoPedido}`, 409);
+
+    const resultado = await fn(tx, pedido);
+    await tx.commit();
+    return resultado;
+  } catch (err) {
+    try { await tx.rollback(); } catch { /* ya abortada por SQL Server */ }
+    throw err;
+  }
+}
+
+/** Lo ya cobrado de un pedido (neto de vuelto), leído dentro de la transacción. */
+async function pagadoEnTx(tx: sql.Transaction, pedidoID: string): Promise<number> {
+  const r = await new sql.Request(tx)
+    .input('pedidoID', sql.UniqueIdentifier, pedidoID)
+    .query(`
+      SELECT ISNULL(SUM(pa.MontoPagado - pa.Vuelto), 0) AS pagado
+      FROM modu_rest_Pagos pa
+      WHERE pa.PedidoID = @pedidoID AND pa.Anulado = 0
+    `);
+  return r.recordset[0].pagado;
+}
+
+/** Igual que recalcularTotales, pero dentro de la transacción. */
+async function recalcularTotalesEnTx(tx: sql.Transaction, pedidoID: string): Promise<void> {
+  await new sql.Request(tx)
+    .input('pedidoID', sql.UniqueIdentifier, pedidoID)
+    .query(`
+      UPDATE p
+      SET p.Subtotal    = ISNULL(t.suma, 0),
+          p.TotalCuenta = ISNULL(t.suma, 0) - ISNULL(p.TotalDescuento, 0)
+      FROM modu_rest_Pedidos p
+      OUTER APPLY (
+        SELECT SUM(cd.Subtotal) AS suma
+        FROM modu_rest_ComandaDetalle cd
+        WHERE cd.PedidoID = p.PedidoID
+          AND cd.EstadoItem <> 'Cancelado'
+      ) t
+      WHERE p.PedidoID = @pedidoID
+    `);
+}
+
 // ── Obtener pedido ────────────────────────────────────
 
 export async function obtenerPedido(pedidoID: string): Promise<Pedido> {
@@ -481,8 +549,12 @@ export async function agregarRonda(
         `);
       if (firmaRonda(detUltima.recordset) === firmaRonda(items))
         throw new AppError(
-          `Esta ronda ya fue enviada hace ${Math.max(1, Math.round(u.msDesde / 1000))} s ` +
-          `(ronda #${u.numeroRonda}). Si de verdad quieres repetirla, espera unos segundos.`,
+          // El texto no debe invitar a reenviar: en el caso típico (la app
+          // mostró "Error de conexión" pero el servidor sí la guardó) el
+          // mesero esperaría y la reenviaría, y pasada la ventana entraría
+          // duplicada (QA r2, hallazgo 1).
+          `Esta ronda ya quedó registrada (ronda #${u.numeroRonda}, ` +
+          `hace ${Math.max(1, Math.round(u.msDesde / 1000))} s). No hace falta reenviarla.`,
           409);
     }
 
@@ -578,102 +650,71 @@ export async function cancelarItemPedido(
   itemsRestantes: number;
 }> {
 
-  // 1. El pedido debe ser modificable
-  const pedidoRows = await query<{
-    estadoPedido: string;
-    totalCuenta:  number;
-    numeroPedido: number;
-    mesaAlias:    string | null;
-  }>(`
-    SELECT
-      p.EstadoPedido AS estadoPedido,
-      p.TotalCuenta  AS totalCuenta,
-      p.NumeroPedido AS numeroPedido,
-      m.Alias        AS mesaAlias
-    FROM modu_rest_Pedidos p
-    LEFT JOIN modu_rest_Mesas m ON p.MesaID = m.MesaID
-    WHERE p.PedidoID = @pedidoID
-  `, (req) => {
-    req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
-  });
+  // Todo en UNA transacción con el bloqueo del pedido (el mismo de
+  // registrarPago / fiado / rondas). Antes, un cobro simultáneo podía
+  // leer el total viejo y marcar Pagado mientras el total cambiaba.
+  const { item, itemsRestantes } = await conBloqueoPedido(pedidoID, async (tx, pedidoActual) => {
 
-  if (pedidoRows.length === 0) throw new AppError('Pedido no encontrado', 404);
+    // 2. El artículo debe existir, pertenecer al pedido y no estar cancelado
+    const itemRows = await new sql.Request(tx)
+      .input('detalleID', sql.UniqueIdentifier, detalleID)
+      .input('pedidoID',  sql.UniqueIdentifier, pedidoID)
+      .query(`
+        SELECT
+          cd.NombreArticulo AS articulo,
+          cd.Subtotal       AS subtotal,
+          cd.EstadoItem     AS estadoItem
+        FROM modu_rest_ComandaDetalle cd
+        WHERE cd.DetalleID = @detalleID AND cd.PedidoID = @pedidoID
+      `);
 
-  const pedidoActual = pedidoRows[0];
+    if (itemRows.recordset.length === 0)
+      throw new AppError('El artículo no pertenece a este pedido', 404);
 
-  if (!ESTADOS_EDITABLES.includes(pedidoActual.estadoPedido))
-    throw new AppError(
-      `No se puede modificar un pedido en estado ${pedidoActual.estadoPedido}`, 409);
+    const item = itemRows.recordset[0] as { articulo: string; subtotal: number; estadoItem: string };
 
-  // 2. El artículo debe existir, pertenecer al pedido y no estar cancelado
-  const itemRows = await query<{
-    articulo: string;
-    subtotal: number;
-    estadoItem: string;
-  }>(`
-    SELECT
-      cd.NombreArticulo AS articulo,
-      cd.Subtotal       AS subtotal,
-      cd.EstadoItem     AS estadoItem
-    FROM modu_rest_ComandaDetalle cd
-    WHERE cd.DetalleID = @detalleID AND cd.PedidoID = @pedidoID
-  `, (req) => {
-    req.input('detalleID', sql.UniqueIdentifier, detalleID);
-    req.input('pedidoID',  sql.UniqueIdentifier, pedidoID);
-  });
+    if (item.estadoItem === 'Cancelado')
+      throw new AppError('Este artículo ya estaba cancelado', 409);
 
-  if (itemRows.length === 0)
-    throw new AppError('El artículo no pertenece a este pedido', 404);
+    // 3. No dejar el total por debajo de lo ya cobrado
+    const yaPagado   = await pagadoEnTx(tx, pedidoID);
+    const nuevoTotal = pedidoActual.totalCuenta - item.subtotal;
 
-  const item = itemRows[0];
+    if (nuevoTotal < yaPagado) {
+      throw new AppError(
+        `No se puede quitar este artículo: el pedido quedaría en ` +
+        `$${nuevoTotal.toLocaleString()} y ya se han cobrado ` +
+        `$${yaPagado.toLocaleString()}. Anula primero el pago.`,
+        409);
+    }
 
-  if (item.estadoItem === 'Cancelado')
-    throw new AppError('Este artículo ya estaba cancelado', 409);
+    // 4. Marcar como cancelado dejando el rastro
+    await new sql.Request(tx)
+      .input('detalleID', sql.UniqueIdentifier, detalleID)
+      .input('usuarioID', sql.UniqueIdentifier, usuarioID)
+      .input('motivo',    sql.NVarChar,         motivo)
+      .query(`
+        UPDATE modu_rest_ComandaDetalle SET
+          EstadoItem        = 'Cancelado',
+          MotivoCancelacion = @motivo,
+          CanceladoPor      = @usuarioID,
+          FechaCancelacion  = SYSUTCDATETIME()
+        WHERE DetalleID = @detalleID
+      `);
 
-  // 3. No dejar el total por debajo de lo ya cobrado
-  const pagos = await query<{ pagado: number }>(`
-    SELECT ISNULL(SUM(pa.MontoPagado - pa.Vuelto), 0) AS pagado
-    FROM modu_rest_Pagos pa
-    WHERE pa.PedidoID = @pedidoID AND pa.Anulado = 0
-  `, (req) => {
-    req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
-  });
+    // 5. Recalcular el total del pedido
+    await recalcularTotalesEnTx(tx, pedidoID);
 
-  const yaPagado  = pagos[0].pagado;
-  const nuevoTotal = pedidoActual.totalCuenta - item.subtotal;
+    // 6. Cuántos artículos quedan vigentes
+    const restantes = await new sql.Request(tx)
+      .input('pedidoID', sql.UniqueIdentifier, pedidoID)
+      .query(`
+        SELECT COUNT(*) AS total
+        FROM modu_rest_ComandaDetalle
+        WHERE PedidoID = @pedidoID AND EstadoItem <> 'Cancelado'
+      `);
 
-  if (nuevoTotal < yaPagado) {
-    throw new AppError(
-      `No se puede quitar este artículo: el pedido quedaría en ` +
-      `$${nuevoTotal.toLocaleString()} y ya se han cobrado ` +
-      `$${yaPagado.toLocaleString()}. Anula primero el pago.`,
-      409);
-  }
-
-  // 4. Marcar como cancelado dejando el rastro
-  await query(`
-    UPDATE modu_rest_ComandaDetalle SET
-      EstadoItem        = 'Cancelado',
-      MotivoCancelacion = @motivo,
-      CanceladoPor      = @usuarioID,
-      FechaCancelacion  = SYSUTCDATETIME()
-    WHERE DetalleID = @detalleID
-  `, (req) => {
-    req.input('detalleID', sql.UniqueIdentifier, detalleID);
-    req.input('usuarioID', sql.UniqueIdentifier, usuarioID);
-    req.input('motivo',    sql.NVarChar,         motivo);
-  });
-
-  // 5. Recalcular el total del pedido
-  await recalcularTotales(pedidoID);
-
-  // 6. Cuántos artículos quedan vigentes
-  const restantes = await query<{ total: number }>(`
-    SELECT COUNT(*) AS total
-    FROM modu_rest_ComandaDetalle
-    WHERE PedidoID = @pedidoID AND EstadoItem <> 'Cancelado'
-  `, (req) => {
-    req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
+    return { item, itemsRestantes: restantes.recordset[0].total as number };
   });
 
   const pedido = await obtenerPedido(pedidoID);
@@ -682,7 +723,7 @@ export async function cancelarItemPedido(
     pedido,
     articulo:       item.articulo,
     montoRetirado:  item.subtotal,
-    itemsRestantes: restantes[0].total,
+    itemsRestantes,
   };
 }
 
@@ -703,84 +744,69 @@ export async function cambiarCantidadItem(
   if (cantidad <= 0)
     throw new AppError('La cantidad debe ser mayor a cero. Para quitar el artículo, cancélalo.', 400);
 
-  // 1. El pedido debe ser modificable
-  const pedidoRows = await query<{ estadoPedido: string; totalCuenta: number }>(`
-    SELECT EstadoPedido AS estadoPedido, TotalCuenta AS totalCuenta
-    FROM modu_rest_Pedidos WHERE PedidoID = @pedidoID
-  `, (req) => {
-    req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
+  // Todo en UNA transacción con el bloqueo del pedido. Antes, cambiar la
+  // cantidad mientras se cobraba dejaba el pedido Pagado con un total
+  // mayor a lo cobrado (QA r2: X3).
+  const { articulo, nuevoSubtotal } = await conBloqueoPedido(pedidoID, async (tx, pedidoActual) => {
+
+    // 2. El artículo debe existir y estar vigente
+    const itemRows = await new sql.Request(tx)
+      .input('detalleID', sql.UniqueIdentifier, detalleID)
+      .input('pedidoID',  sql.UniqueIdentifier, pedidoID)
+      .query(`
+        SELECT
+          cd.NombreArticulo       AS articulo,
+          cd.Cantidad             AS cantidad,
+          cd.PrecioVentaHistorico AS precio,
+          cd.Subtotal             AS subtotal,
+          cd.EstadoItem           AS estadoItem
+        FROM modu_rest_ComandaDetalle cd
+        WHERE cd.DetalleID = @detalleID AND cd.PedidoID = @pedidoID
+      `);
+
+    if (itemRows.recordset.length === 0)
+      throw new AppError('El artículo no pertenece a este pedido', 404);
+
+    const item = itemRows.recordset[0] as {
+      articulo: string; cantidad: number; precio: number; subtotal: number; estadoItem: string;
+    };
+
+    if (item.estadoItem === 'Cancelado')
+      throw new AppError('Este artículo está cancelado', 409);
+
+    // 3. No dejar el total por debajo de lo ya cobrado
+    const nuevoSubtotal = item.precio * cantidad;
+    const nuevoTotal    = pedidoActual.totalCuenta - item.subtotal + nuevoSubtotal;
+    const pagado        = await pagadoEnTx(tx, pedidoID);
+
+    if (nuevoTotal < pagado) {
+      throw new AppError(
+        `No se puede reducir tanto: el pedido quedaría en ` +
+        `$${nuevoTotal.toLocaleString()} y ya se cobraron ` +
+        `$${pagado.toLocaleString()}.`,
+        409);
+    }
+
+    // 4. Actualizar la línea
+    await new sql.Request(tx)
+      .input('detalleID', sql.UniqueIdentifier, detalleID)
+      .input('cantidad',  sql.Decimal(10, 2),   cantidad)
+      .input('subtotal',  sql.Decimal(18, 2),   nuevoSubtotal)
+      .query(`
+        UPDATE modu_rest_ComandaDetalle SET
+          Cantidad = @cantidad,
+          Subtotal = @subtotal
+        WHERE DetalleID = @detalleID
+      `);
+
+    await recalcularTotalesEnTx(tx, pedidoID);
+
+    return { articulo: item.articulo, nuevoSubtotal };
   });
-
-  if (pedidoRows.length === 0) throw new AppError('Pedido no encontrado', 404);
-
-  if (!ESTADOS_EDITABLES.includes(pedidoRows[0].estadoPedido))
-    throw new AppError(
-      `No se puede modificar un pedido en estado ${pedidoRows[0].estadoPedido}`, 409);
-
-  // 2. El artículo debe existir y estar vigente
-  const itemRows = await query<{
-    articulo: string; cantidad: number;
-    precio: number; subtotal: number; estadoItem: string;
-  }>(`
-    SELECT
-      cd.NombreArticulo       AS articulo,
-      cd.Cantidad             AS cantidad,
-      cd.PrecioVentaHistorico AS precio,
-      cd.Subtotal             AS subtotal,
-      cd.EstadoItem           AS estadoItem
-    FROM modu_rest_ComandaDetalle cd
-    WHERE cd.DetalleID = @detalleID AND cd.PedidoID = @pedidoID
-  `, (req) => {
-    req.input('detalleID', sql.UniqueIdentifier, detalleID);
-    req.input('pedidoID',  sql.UniqueIdentifier, pedidoID);
-  });
-
-  if (itemRows.length === 0)
-    throw new AppError('El artículo no pertenece a este pedido', 404);
-
-  const item = itemRows[0];
-
-  if (item.estadoItem === 'Cancelado')
-    throw new AppError('Este artículo está cancelado', 409);
-
-  // 3. No dejar el total por debajo de lo ya cobrado
-  const nuevoSubtotal = item.precio * cantidad;
-  const nuevoTotal =
-    pedidoRows[0].totalCuenta - item.subtotal + nuevoSubtotal;
-
-  const pagos = await query<{ pagado: number }>(`
-    SELECT ISNULL(SUM(pa.MontoPagado - pa.Vuelto), 0) AS pagado
-    FROM modu_rest_Pagos pa
-    WHERE pa.PedidoID = @pedidoID AND pa.Anulado = 0
-  `, (req) => {
-    req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
-  });
-
-  if (nuevoTotal < pagos[0].pagado) {
-    throw new AppError(
-      `No se puede reducir tanto: el pedido quedaría en ` +
-      `$${nuevoTotal.toLocaleString()} y ya se cobraron ` +
-      `$${pagos[0].pagado.toLocaleString()}.`,
-      409);
-  }
-
-  // 4. Actualizar la línea
-  await query(`
-    UPDATE modu_rest_ComandaDetalle SET
-      Cantidad = @cantidad,
-      Subtotal = @subtotal
-    WHERE DetalleID = @detalleID
-  `, (req) => {
-    req.input('detalleID', sql.UniqueIdentifier, detalleID);
-    req.input('cantidad',  sql.Decimal(10, 2),   cantidad);
-    req.input('subtotal',  sql.Decimal(18, 2),   nuevoSubtotal);
-  });
-
-  await recalcularTotales(pedidoID);
 
   return {
     pedido: await obtenerPedido(pedidoID),
-    articulo: item.articulo,
+    articulo,
     nuevoSubtotal,
   };
 }

@@ -29,7 +29,7 @@
 // pedido ya puede nacer en 'Abierto' si algún día hace falta — hoy
 // simplemente no se usa esa rama.
 
-import { query, sql } from '../../config/database';
+import { query, sql, getPool } from '../../config/database';
 import { AppError } from '../../middlewares/error.middleware';
 import { enDiaLocal, entreDiasLocales, fechaLocal } from '../../shared/fechas';
 import { registrarEvento } from '../../shared/eventos.service';
@@ -70,15 +70,19 @@ export interface Domicilio {
 
 const ESTADOS_VENTA = `('Pagado', 'Fiado')`;
 
-async function siguienteNumeroPedido(fecha: Date): Promise<number> {
-  const rows = await query<{ siguiente: number }>(`
-    SELECT ISNULL(MAX(NumeroPedido), 0) + 1 AS siguiente
-    FROM modu_rest_Pedidos
-    WHERE ${enDiaLocal('FechaApertura', fechaLocal('@fecha'))}
-  `, (req) => {
-    req.input('fecha', sql.DateTime2, fecha);
-  });
-  return rows[0].siguiente;
+// Consecutivo del día local de `fecha`, dentro de la transacción del
+// domicilio. UPDLOCK + HOLDLOCK sobre el rango del día: es el mismo
+// bloqueo que usa abrirPedido, así que domicilios, mesas y para llevar
+// simultáneos ya no reciben el mismo número.
+async function siguienteNumeroPedido(tx: sql.Transaction, fecha: Date): Promise<number> {
+  const r = await new sql.Request(tx)
+    .input('fecha', sql.DateTime2, fecha)
+    .query(`
+      SELECT ISNULL(MAX(NumeroPedido), 0) + 1 AS siguiente
+      FROM modu_rest_Pedidos WITH (UPDLOCK, HOLDLOCK)
+      WHERE ${enDiaLocal('FechaApertura', fechaLocal('@fecha'))}
+    `);
+  return r.recordset[0].siguiente;
 }
 
 // ── Crear domicilio ────────────────────────────────────
@@ -171,111 +175,131 @@ export async function crearDomicilio(
   );
 
   const totalCuenta = subtotal;
-  const numeroPedido = await siguienteNumeroPedido(fechaPedido);
 
-  // 6. Insertar el pedido — nace y muere en el mismo instante.
-  //    Sin MesaID, sin MeseroID real: el cajero que lo captura queda
-  //    como responsable administrativo, pero el pedido no aparece en
-  //    su informe de meseros porque ese informe filtra por rol Mesero.
-  const pedidoRows = await query<{ PedidoID: string }>(`
-    INSERT INTO modu_rest_Pedidos (
-      MesaID, MeseroID, NumeroPedido, TipoPedido,
-      NombreCliente, NumeroPersonas, EstadoPedido,
-      Subtotal, TotalImpuestos, TotalDescuento, TotalCuenta,
-      NotasGenerales, ClienteID, DomiciliarioID, DireccionEntrega,
-      FechaApertura, FechaCierre
-    )
-    OUTPUT INSERTED.PedidoID
-    VALUES (
-      NULL, @cajeroID, @numeroPedido, 'Domicilio',
-      @nombreCliente, 1, 'Pagado',
-      @subtotal, 0, 0, @totalCuenta,
-      @notasGenerales, @clienteID, @domiciliarioID, @direccion,
-      @fechaPedido, @fechaPedido
-    )
-  `, (req) => {
-    req.input('cajeroID',       sql.UniqueIdentifier, cajeroID);
-    req.input('numeroPedido',   sql.Int,              numeroPedido);
-    req.input('nombreCliente',  sql.NVarChar,         cliente.nombre);
-    req.input('subtotal',       sql.Decimal(18, 2),   subtotal);
-    req.input('totalCuenta',    sql.Decimal(18, 2),   totalCuenta);
-    req.input('notasGenerales', sql.NVarChar,         data.notasGenerales ?? null);
-    req.input('clienteID',      sql.UniqueIdentifier, data.clienteID);
-    req.input('domiciliarioID', sql.UniqueIdentifier, data.domiciliarioID);
-    req.input('direccion',      sql.NVarChar,         direccion);
-    req.input('fechaPedido',    sql.DateTime2,        fechaPedido);
-  });
+  // 6-8. Consecutivo, pedido, comanda, detalle y pago en UNA transacción.
+  //      Antes cada INSERT iba suelto y el consecutivo se calculaba sin
+  //      bloqueo: varios domicilios simultáneos recibían el mismo
+  //      NumeroPedido (QA r2: X4), y una falla a mitad de camino dejaba
+  //      un pedido sin comanda o sin pago.
+  const pool = await getPool();
+  const tx   = new sql.Transaction(pool);
+  await tx.begin(sql.ISOLATION_LEVEL.READ_COMMITTED);
 
-  const pedidoID = pedidoRows[0].PedidoID;
+  let pedidoID: string;
+  let numeroPedido: number;
 
-  // 7. Comanda y detalle — nace despachada: no hay entrega en mesa
-  //    que confirmar, el domicilio ya se entregó cuando se anotó.
-  const comandaRows = await query<{ ComandaID: string }>(`
-    INSERT INTO modu_rest_Comandas (
-      PedidoID, NumeroRonda, Estado, HoraEnviada, HoraDespachada
-    )
-    OUTPUT INSERTED.ComandaID
-    VALUES (@pedidoID, 1, 'Despachada', @fechaPedido, @fechaPedido)
-  `, (req) => {
-    req.input('pedidoID',    sql.UniqueIdentifier, pedidoID);
-    req.input('fechaPedido', sql.DateTime2,        fechaPedido);
-  });
+  try {
+    numeroPedido = await siguienteNumeroPedido(tx, fechaPedido);
 
-  const comandaID = comandaRows[0].ComandaID;
+    // 6. Insertar el pedido — nace y muere en el mismo instante.
+    //    Sin MesaID, sin MeseroID real: el cajero que lo captura queda
+    //    como responsable administrativo, pero el pedido no aparece en
+    //    su informe de meseros porque ese informe filtra por rol Mesero.
+    const pedidoRows = await new sql.Request(tx)
+      .input('cajeroID',       sql.UniqueIdentifier, cajeroID)
+      .input('numeroPedido',   sql.Int,              numeroPedido)
+      .input('nombreCliente',  sql.NVarChar,         cliente.nombre)
+      .input('subtotal',       sql.Decimal(18, 2),   subtotal)
+      .input('totalCuenta',    sql.Decimal(18, 2),   totalCuenta)
+      .input('notasGenerales', sql.NVarChar,         data.notasGenerales ?? null)
+      .input('clienteID',      sql.UniqueIdentifier, data.clienteID)
+      .input('domiciliarioID', sql.UniqueIdentifier, data.domiciliarioID)
+      .input('direccion',      sql.NVarChar,         direccion)
+      .input('fechaPedido',    sql.DateTime2,        fechaPedido)
+      .query(`
+        INSERT INTO modu_rest_Pedidos (
+          MesaID, MeseroID, NumeroPedido, TipoPedido,
+          NombreCliente, NumeroPersonas, EstadoPedido,
+          Subtotal, TotalImpuestos, TotalDescuento, TotalCuenta,
+          NotasGenerales, ClienteID, DomiciliarioID, DireccionEntrega,
+          FechaApertura, FechaCierre
+        )
+        OUTPUT INSERTED.PedidoID
+        VALUES (
+          NULL, @cajeroID, @numeroPedido, 'Domicilio',
+          @nombreCliente, 1, 'Pagado',
+          @subtotal, 0, 0, @totalCuenta,
+          @notasGenerales, @clienteID, @domiciliarioID, @direccion,
+          @fechaPedido, @fechaPedido
+        )
+      `);
 
-  for (const item of itemsConPrecio) {
-    await query(`
-      INSERT INTO modu_rest_ComandaDetalle (
-        ComandaID, PedidoID, IdArticulo, NombreArticulo,
-        Cantidad, PrecioVentaHistorico,
-        PorcentajeIVA, MontoIVA, MontoDescuento,
-        Subtotal, EstadoItem, NotasEspeciales, HoraPedido
-      )
-      VALUES (
-        @comandaID, @pedidoID, @articuloID, @nombreArticulo,
-        @cantidad, @precioVenta,
-        0, 0, 0,
-        @subtotal, 'Entregado', @notasEspeciales, @fechaPedido
-      )
-    `, (req) => {
-      req.input('comandaID',       sql.UniqueIdentifier, comandaID);
-      req.input('pedidoID',        sql.UniqueIdentifier, pedidoID);
-      req.input('articuloID',      sql.Int,              item.articuloID);
-      req.input('nombreArticulo',  sql.NVarChar,         item.nombre);
-      req.input('cantidad',        sql.Decimal(10, 2),   item.cantidad);
-      req.input('precioVenta',     sql.Decimal(18, 2),   item.precioVenta);
-      req.input('subtotal',        sql.Decimal(18, 2),   item.itemSubtotal);
-      req.input('notasEspeciales', sql.NVarChar,         item.notasEspeciales ?? null);
-      req.input('fechaPedido',     sql.DateTime2,        fechaPedido);
-    });
+    pedidoID = pedidoRows.recordset[0].PedidoID;
+
+    // 7. Comanda y detalle — nace despachada: no hay entrega en mesa
+    //    que confirmar, el domicilio ya se entregó cuando se anotó.
+    const comandaRows = await new sql.Request(tx)
+      .input('pedidoID',    sql.UniqueIdentifier, pedidoID)
+      .input('fechaPedido', sql.DateTime2,        fechaPedido)
+      .query(`
+        INSERT INTO modu_rest_Comandas (
+          PedidoID, NumeroRonda, Estado, HoraEnviada, HoraDespachada
+        )
+        OUTPUT INSERTED.ComandaID
+        VALUES (@pedidoID, 1, 'Despachada', @fechaPedido, @fechaPedido)
+      `);
+
+    const comandaID = comandaRows.recordset[0].ComandaID;
+
+    for (const item of itemsConPrecio) {
+      await new sql.Request(tx)
+        .input('comandaID',       sql.UniqueIdentifier, comandaID)
+        .input('pedidoID',        sql.UniqueIdentifier, pedidoID)
+        .input('articuloID',      sql.Int,              item.articuloID)
+        .input('nombreArticulo',  sql.NVarChar,         item.nombre)
+        .input('cantidad',        sql.Decimal(10, 2),   item.cantidad)
+        .input('precioVenta',     sql.Decimal(18, 2),   item.precioVenta)
+        .input('subtotal',        sql.Decimal(18, 2),   item.itemSubtotal)
+        .input('notasEspeciales', sql.NVarChar,         item.notasEspeciales ?? null)
+        .input('fechaPedido',     sql.DateTime2,        fechaPedido)
+        .query(`
+          INSERT INTO modu_rest_ComandaDetalle (
+            ComandaID, PedidoID, IdArticulo, NombreArticulo,
+            Cantidad, PrecioVentaHistorico,
+            PorcentajeIVA, MontoIVA, MontoDescuento,
+            Subtotal, EstadoItem, NotasEspeciales, HoraPedido
+          )
+          VALUES (
+            @comandaID, @pedidoID, @articuloID, @nombreArticulo,
+            @cantidad, @precioVenta,
+            0, 0, 0,
+            @subtotal, 'Entregado', @notasEspeciales, @fechaPedido
+          )
+        `);
+    }
+
+    // 8. Pago — TurnoID NULL a propósito. Este dinero no pertenece a
+    //    ningún arqueo: no se puede reconstruir en qué cajón físico
+    //    estuvo hace ocho horas.
+    await new sql.Request(tx)
+      .input('pedidoID',     sql.UniqueIdentifier, pedidoID)
+      .input('metodoID',     sql.UniqueIdentifier, data.metodoID)
+      .input('cajeroID',     sql.UniqueIdentifier, cajeroID)
+      .input('totalCuenta',  sql.Decimal(18, 2),   totalCuenta)
+      .input('metadataPago', sql.NVarChar, JSON.stringify({
+        tipoPedido: 'Domicilio',
+        clienteID: data.clienteID,
+        capturadoEn: new Date().toISOString(),
+      }))
+      .input('fechaPedido',  sql.DateTime2, fechaPedido)
+      .query(`
+        INSERT INTO modu_rest_Pagos (
+          PedidoID, MetodoID, CajeroID, TurnoID,
+          MontoPagado, MontoEsperado, Vuelto, Propina,
+          MetadataPago, FechaTransaccion
+        )
+        VALUES (
+          @pedidoID, @metodoID, @cajeroID, NULL,
+          @totalCuenta, @totalCuenta, 0, 0,
+          @metadataPago, @fechaPedido
+        )
+      `);
+
+    await tx.commit();
+  } catch (err) {
+    try { await tx.rollback(); } catch { /* ya abortada por SQL Server */ }
+    throw err;
   }
-
-  // 8. Pago — TurnoID NULL a propósito. Este dinero no pertenece a
-  //    ningún arqueo: no se puede reconstruir en qué cajón físico
-  //    estuvo hace ocho horas.
-  await query(`
-    INSERT INTO modu_rest_Pagos (
-      PedidoID, MetodoID, CajeroID, TurnoID,
-      MontoPagado, MontoEsperado, Vuelto, Propina,
-      MetadataPago, FechaTransaccion
-    )
-    VALUES (
-      @pedidoID, @metodoID, @cajeroID, NULL,
-      @totalCuenta, @totalCuenta, 0, 0,
-      @metadataPago, @fechaPedido
-    )
-  `, (req) => {
-    req.input('pedidoID',     sql.UniqueIdentifier, pedidoID);
-    req.input('metodoID',     sql.UniqueIdentifier, data.metodoID);
-    req.input('cajeroID',     sql.UniqueIdentifier, cajeroID);
-    req.input('totalCuenta',  sql.Decimal(18, 2),   totalCuenta);
-    req.input('metadataPago', sql.NVarChar, JSON.stringify({
-      tipoPedido: 'Domicilio',
-      clienteID: data.clienteID,
-      capturadoEn: new Date().toISOString(),
-    }));
-    req.input('fechaPedido',  sql.DateTime2, fechaPedido);
-  });
 
   // 9. Última vez que este cliente pidió — para ordenar la búsqueda
   await marcarUltimoPedido(data.clienteID);

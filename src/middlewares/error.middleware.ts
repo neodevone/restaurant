@@ -22,7 +22,14 @@ export function errorMiddleware(
   res: Response,
   next: NextFunction
 ): void {
-  console.error(`[ERROR] ${req.method} ${req.path}`, err.message);
+  // Un AppError 4xx es una respuesta esperada (409 "mesa ocupada",
+  // 400 de validación…), no una falla: va a stdout como [AVISO] para
+  // que el log de errores (stderr) solo tenga errores reales.
+  if (err instanceof AppError && err.statusCode < 500) {
+    console.log(`[AVISO ${err.statusCode}] ${req.method} ${req.path}`, err.message);
+  } else {
+    console.error(`[ERROR] ${req.method} ${req.path}`, err.message);
+  }
 
   // Error operacional conocido (lanzado intencionalmente con AppError)
   if (err instanceof AppError) {
