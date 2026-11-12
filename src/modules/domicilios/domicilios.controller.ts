@@ -1,5 +1,6 @@
 // src/modules/domicilios/domicilios.controller.ts
 
+import { hoyLocal } from '../../shared/fechas';
 import { Request, Response, NextFunction } from 'express';
 import Joi from 'joi';
 import { respond } from '../../shared/response.helper';
@@ -34,7 +35,7 @@ const crearSchema = Joi.object({
 });
 
 function getFiltroFecha(req: Request) {
-  const hoy = new Date().toISOString().split('T')[0];
+  const hoy = hoyLocal();
   return {
     desde: (req.query.desde as string) ?? hoy,
     hasta: (req.query.hasta as string) ?? hoy,

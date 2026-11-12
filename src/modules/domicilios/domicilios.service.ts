@@ -31,6 +31,7 @@
 
 import { query, sql } from '../../config/database';
 import { AppError } from '../../middlewares/error.middleware';
+import { enDiaLocal, entreDiasLocales, fechaLocal } from '../../shared/fechas';
 import { registrarEvento } from '../../shared/eventos.service';
 import { obtenerPrecioArticulo } from '../pedidos/pedidos.service';
 import { marcarUltimoPedido } from '../clientes/clientes.service';
@@ -73,7 +74,7 @@ async function siguienteNumeroPedido(fecha: Date): Promise<number> {
   const rows = await query<{ siguiente: number }>(`
     SELECT ISNULL(MAX(NumeroPedido), 0) + 1 AS siguiente
     FROM modu_rest_Pedidos
-    WHERE CAST(FechaApertura AS DATE) = CAST(@fecha AS DATE)
+    WHERE ${enDiaLocal('FechaApertura', fechaLocal('@fecha'))}
   `, (req) => {
     req.input('fecha', sql.DateTime2, fecha);
   });
@@ -342,7 +343,7 @@ export async function listarDomicilios(filtros: {
     LEFT JOIN modu_rest_Clientes c ON p.ClienteID      = c.ClienteID
     LEFT JOIN modu_rest_Usuarios d ON p.DomiciliarioID = d.UsuarioID
     WHERE p.TipoPedido = 'Domicilio'
-      AND CAST(p.FechaApertura AS DATE) BETWEEN @desde AND @hasta
+      AND ${entreDiasLocales('p.FechaApertura', '@desde', '@hasta')}
       AND (@clienteID IS NULL OR p.ClienteID = @clienteID)
     ORDER BY p.FechaApertura DESC
   `, (req) => {
@@ -389,7 +390,7 @@ export async function resumenDomicilios(filtros: {
       FROM modu_rest_Pedidos p
       WHERE p.TipoPedido = 'Domicilio'
         AND p.EstadoPedido IN ${ESTADOS_VENTA}
-        AND CAST(p.FechaApertura AS DATE) BETWEEN @desde AND @hasta
+        AND ${entreDiasLocales('p.FechaApertura', '@desde', '@hasta')}
     `, (req) => {
       req.input('desde', sql.Date, filtros.desde);
       req.input('hasta', sql.Date, filtros.hasta);
@@ -406,7 +407,7 @@ export async function resumenDomicilios(filtros: {
       JOIN modu_rest_MetodosPago mp ON pa.MetodoID = mp.MetodoID
       WHERE p.TipoPedido = 'Domicilio'
         AND pa.Anulado = 0
-        AND CAST(p.FechaApertura AS DATE) BETWEEN @desde AND @hasta
+        AND ${entreDiasLocales('p.FechaApertura', '@desde', '@hasta')}
       GROUP BY mp.Nombre, mp.Tipo
       ORDER BY total DESC
     `, (req) => {

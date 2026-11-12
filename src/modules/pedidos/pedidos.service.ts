@@ -8,6 +8,7 @@
 
 import { query, sql, getPool } from '../../config/database';
 import { AppError } from '../../middlewares/error.middleware';
+import { enDiaLocal, HOY_LOCAL } from '../../shared/fechas';
 import { registrarEvento } from '../../shared/eventos.service';
 import { cambiarEstadoMesa } from '../mesas/mesas.service';
 
@@ -202,7 +203,7 @@ export async function listarPedidos(filtros: {
     WHERE
       (@estado IS NULL OR p.EstadoPedido = @estado)
       AND (@mesaID IS NULL OR p.MesaID   = @mesaID)
-      AND (@fecha  IS NULL OR CAST(p.FechaApertura AS DATE) = @fecha)
+      AND (@fecha  IS NULL OR ${enDiaLocal('p.FechaApertura', '@fecha')})
     ORDER BY p.FechaApertura DESC
   `, (req) => {
     req.input('estado', sql.NVarChar,         filtros.estado ?? null);
@@ -279,7 +280,7 @@ export async function abrirPedido(
     const numRows = await new sql.Request(tx).query(`
       SELECT ISNULL(MAX(NumeroPedido), 0) + 1 AS siguiente
       FROM modu_rest_Pedidos WITH (UPDLOCK, HOLDLOCK)
-      WHERE CAST(FechaApertura AS DATE) = CAST(SYSUTCDATETIME() AS DATE)
+      WHERE ${enDiaLocal('FechaApertura', HOY_LOCAL)}
     `);
     numeroPedido = numRows.recordset[0].siguiente;
 

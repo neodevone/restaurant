@@ -2,6 +2,7 @@
 
 import { query, sql, getPool } from '../../config/database';
 import { AppError } from '../../middlewares/error.middleware';
+import { entreDiasLocales } from '../../shared/fechas';
 import { registrarEvento } from '../../shared/eventos.service';
 import { cambiarEstadoMesa } from '../mesas/mesas.service';
 import { exigirTurnoAbierto } from '../turnos/turnos.service';
@@ -833,7 +834,7 @@ export async function listarPagosPorFecha(
     LEFT JOIN modu_rest_Mesas  m  ON pe.MesaID  = m.MesaID
     WHERE
       p.Anulado = 0
-      AND CAST(p.FechaTransaccion AS DATE) BETWEEN @desde AND @hasta
+      AND ${entreDiasLocales('p.FechaTransaccion', '@desde', '@hasta')}
     ORDER BY p.FechaTransaccion DESC
   `, (req) => {
     req.input('desde', sql.Date, desde);

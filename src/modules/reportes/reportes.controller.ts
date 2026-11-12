@@ -1,5 +1,6 @@
 // src/modules/reportes/reportes.controller.ts
 
+import { hoyLocal } from '../../shared/fechas';
 import { Request, Response, NextFunction } from 'express';
 import {
   reporteVentasDiarias,
@@ -21,7 +22,7 @@ import {
 // ── Helper para fechas ───────────────────────────────
 
 function getFiltroFecha(req: Request) {
-  const hoy = new Date().toISOString().split('T')[0];
+  const hoy = hoyLocal();
   const desde = (req.query.desde as string) ?? hoy;
   const hasta = (req.query.hasta as string) ?? hoy;
   return { desde, hasta };
