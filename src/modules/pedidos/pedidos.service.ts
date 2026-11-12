@@ -464,6 +464,17 @@ export async function abrirPedido(
 // timeout. Con 10 s el reintento pasaba como ronda nueva (QA, caso D3).
 export const VENTANA_RONDA_DUPLICADA_MS = 45_000;
 
+// Ventana extendida: una ronda idéntica a la última se sigue rechazando
+// hasta este tiempo SI la última todavía no está marcada como entregada
+// (Estado 'Despachada', que pone el MESERO con "Ya entregué en la mesa" /
+// "Entregar ronda"; no hay paso por cocina) ni cancelada.
+// Cubre el reintento lento: la app espera 15 s de timeout (el escritorio
+// 30 s) y luego el mesero lee el error, abre el carrito y reenvía; en QA
+// r3 (D3) eso llegó a los 48-62 s y la ronda entró duplicada. Si la
+// última ronda ya se entregó en la mesa, una idéntica es un pedido nuevo.
+export const VENTANA_RONDA_NO_DESPACHADA_MS = 120_000;
+const ESTADOS_COMANDA_CERRADA = ['Despachada', 'Cancelada'];
+
 // Firma de una ronda: artículos + cantidades + notas, sin importar el orden.
 function firmaRonda(items: { articuloID: number; cantidad: number; notasEspeciales?: string | null }[]): string {
   return items
@@ -501,7 +512,8 @@ export async function agregarRonda(
   //
   // UPDLOCK + HOLDLOCK sobre la fila del pedido serializa las rondas de
   // un mismo pedido. Dentro del bloqueo se rechaza una ronda idéntica a
-  // la última si llegó hace menos de VENTANA_RONDA_DUPLICADA_MS.
+  // la última si llegó hace menos de VENTANA_RONDA_DUPLICADA_MS, o hace
+  // menos de VENTANA_RONDA_NO_DESPACHADA_MS y la última sigue sin entregar.
   const pool = await getPool();
   const tx   = new sql.Transaction(pool);
   await tx.begin(sql.ISOLATION_LEVEL.READ_COMMITTED);
@@ -531,6 +543,7 @@ export async function agregarRonda(
         SELECT TOP 1
           c.ComandaID   AS comandaID,
           c.NumeroRonda AS numeroRonda,
+          c.Estado      AS estado,
           DATEDIFF(MILLISECOND, c.HoraEnviada, SYSUTCDATETIME()) AS msDesde
         FROM modu_rest_Comandas c
         WHERE c.PedidoID = @pedidoID
@@ -538,7 +551,11 @@ export async function agregarRonda(
       `);
 
     const u = ultima.recordset[0];
-    if (u && u.msDesde < VENTANA_RONDA_DUPLICADA_MS) {
+    const posibleRepeticion = u && (
+      u.msDesde < VENTANA_RONDA_DUPLICADA_MS ||
+      (u.msDesde < VENTANA_RONDA_NO_DESPACHADA_MS && !ESTADOS_COMANDA_CERRADA.includes(u.estado))
+    );
+    if (posibleRepeticion) {
       const detUltima = await new sql.Request(tx)
         .input('comandaID', sql.UniqueIdentifier, u.comandaID)
         .query(`
