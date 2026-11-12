@@ -1,6 +1,6 @@
 // src/modules/pagos/pagos.service.ts
 
-import { query, sql } from '../../config/database';
+import { query, sql, getPool } from '../../config/database';
 import { AppError } from '../../middlewares/error.middleware';
 import { registrarEvento } from '../../shared/eventos.service';
 import { cambiarEstadoMesa } from '../mesas/mesas.service';
@@ -651,25 +651,45 @@ export async function anularPago(
   if (pago.anulado)
     throw new AppError('Este pago ya fue anulado anteriormente', 409);
 
-  await query(`
-    UPDATE modu_rest_Pagos SET
-      Anulado    = 1,
-      MotivoBaja = @motivo
-    WHERE PagoID = @pagoID
-  `, (req) => {
-    req.input('pagoID',  sql.UniqueIdentifier, pagoID);
-    req.input('motivo',  sql.NVarChar,         motivo);
-  });
+  // Anular el pago y reabrir el pedido van juntos: si el pedido no se
+  // puede reabrir (su mesa ya tiene otro pedido activo y el índice
+  // UX_modu_rest_Pedidos_MesaActiva lo impide), el pago NO debe quedar
+  // anulado a medias.
+  const pool = await getPool();
+  const tx   = new sql.Transaction(pool);
+  await tx.begin();
+  try {
+    await new sql.Request(tx)
+      .input('pagoID',  sql.UniqueIdentifier, pagoID)
+      .input('motivo',  sql.NVarChar,         motivo)
+      .query(`
+        UPDATE modu_rest_Pagos SET
+          Anulado    = 1,
+          MotivoBaja = @motivo
+        WHERE PagoID = @pagoID
+      `);
 
-  // Un pedido cerrado (pagado o fiado) vuelve a quedar cobrable
-  await query(`
-    UPDATE modu_rest_Pedidos SET
-      EstadoPedido = 'Por Pagar',
-      FechaCierre  = NULL
-    WHERE PedidoID = @pedidoID AND EstadoPedido IN ('Pagado', 'Fiado')
-  `, (req) => {
-    req.input('pedidoID', sql.UniqueIdentifier, pago.pedidoID);
-  });
+    // Un pedido cerrado (pagado o fiado) vuelve a quedar cobrable
+    await new sql.Request(tx)
+      .input('pedidoID', sql.UniqueIdentifier, pago.pedidoID)
+      .query(`
+        UPDATE modu_rest_Pedidos SET
+          EstadoPedido = 'Por Pagar',
+          FechaCierre  = NULL
+        WHERE PedidoID = @pedidoID AND EstadoPedido IN ('Pagado', 'Fiado')
+      `);
+
+    await tx.commit();
+  } catch (err) {
+    try { await tx.rollback(); } catch { /* ya abortada */ }
+    const num = (err as { number?: number })?.number
+             ?? (err as { originalError?: { info?: { number?: number } } })?.originalError?.info?.number;
+    if (num === 2601 || num === 2627)
+      throw new AppError(
+        'No se puede anular: la mesa de este pedido ya tiene otro pedido activo. ' +
+        'Cierra o cobra ese pedido primero.', 409);
+    throw err;
+  }
 }
 
 // ── Listar cuentas por cobrar ─────────────────────────

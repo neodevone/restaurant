@@ -6,7 +6,7 @@
 //   · recalcularTotales()   — reconstruye Subtotal/TotalCuenta del detalle
 // El resto del archivo queda igual.
 
-import { query, sql } from '../../config/database';
+import { query, sql, getPool } from '../../config/database';
 import { AppError } from '../../middlewares/error.middleware';
 import { registrarEvento } from '../../shared/eventos.service';
 import { cambiarEstadoMesa } from '../mesas/mesas.service';
@@ -53,15 +53,6 @@ export interface AbrirPedidoDTO {
 const ESTADOS_EDITABLES = ['Abierto', 'Por Pagar'];
 
 // ── Helpers ───────────────────────────────────────────
-
-async function siguienteNumeroPedido(): Promise<number> {
-  const rows = await query<{ siguiente: number }>(`
-    SELECT ISNULL(MAX(NumeroPedido), 0) + 1 AS siguiente
-    FROM modu_rest_Pedidos
-    WHERE CAST(FechaApertura AS DATE) = CAST(SYSUTCDATETIME() AS DATE)
-  `);
-  return rows[0].siguiente;
-}
 
 // Lee precio de venta del sistema existente — ya incluye IVA
 // Exportada: el módulo de domicilios arma sus líneas con el mismo
@@ -227,103 +218,145 @@ export async function abrirPedido(
   data: AbrirPedidoDTO
 ): Promise<Pedido> {
 
-  // 1. Verificar que la mesa esté libre
-  if (data.mesaID) {
-    const mesaOcupada = await query<{ total: number }>(`
-      SELECT COUNT(*) AS total
-      FROM modu_rest_Pedidos
-      WHERE MesaID = @mesaID
-        AND EstadoPedido IN ('Abierto', 'Por Pagar')
-    `, (req) => {
-      req.input('mesaID', sql.UniqueIdentifier, data.mesaID!);
-    });
-
-    if (mesaOcupada[0].total > 0)
-      throw new AppError('Esta mesa ya tiene un pedido activo', 409);
-  }
-
-  // 2. Calcular totales — precio ya incluye IVA, NO calcular encima
-  let subtotal = 0;
-
+  // 1. Precios fuera de la transacción: son solo lecturas y así la
+  //    transacción (y el bloqueo de la mesa) dura lo mínimo.
+  //    TotalCuenta = Subtotal — el precio ya incluye IVA.
   const itemsConPrecio = await Promise.all(
     data.items.map(async (item) => {
       const art          = await obtenerPrecioArticulo(item.articuloID);
       const itemSubtotal = art.precioVenta * item.cantidad;
-      subtotal          += itemSubtotal;
       return { ...item, ...art, itemSubtotal };
     })
   );
+  const subtotal    = itemsConPrecio.reduce((acc, i) => acc + i.itemSubtotal, 0);
+  const totalCuenta = subtotal;
 
-  // TotalCuenta = Subtotal (sin IVA adicional)
-  const totalCuenta  = subtotal;
-  const numeroPedido = await siguienteNumeroPedido();
+  // 2-5. Verificar mesa + crear pedido, comanda e ítems en UNA transacción.
+  //
+  // Antes cada paso era una consulta suelta: si llegaban dos o tres POST
+  // casi simultáneos (doble toque en "Enviar", reintento de la app con
+  // mala señal), todos pasaban el "¿la mesa está libre?" antes de que
+  // cualquiera insertara, y la mesa quedaba con varios pedidos activos.
+  // En producción hay casos con 0-3 ms entre pedidos de la misma mesa.
+  //
+  // UPDLOCK + HOLDLOCK sobre la fila de la mesa serializa las aperturas
+  // de una misma mesa: la segunda petición espera a que la primera haga
+  // COMMIT y entonces ya ve el pedido y recibe 409. El índice único
+  // filtrado UX_modu_rest_Pedidos_MesaActiva es la red de seguridad.
+  const pool = await getPool();
+  const tx   = new sql.Transaction(pool);
+  await tx.begin(sql.ISOLATION_LEVEL.READ_COMMITTED);
 
-  // 3. Crear el pedido
-  const pedidoRows = await query<{ PedidoID: string }>(`
-    INSERT INTO modu_rest_Pedidos (
-      MesaID, MeseroID, NumeroPedido, TipoPedido,
-      NombreCliente, NumeroPersonas, EstadoPedido,
-      Subtotal, TotalImpuestos, TotalDescuento, TotalCuenta,
-      NotasGenerales, MesaAlias
-    )
-    OUTPUT INSERTED.PedidoID
-    VALUES (
-      @mesaID, @meseroID, @numeroPedido, @tipoPedido,
-      @nombreCliente, @numeroPersonas, 'Abierto',
-      @subtotal, 0, 0, @totalCuenta,
-      @notasGenerales,
-      (SELECT Alias FROM modu_rest_Mesas WHERE MesaID = @mesaID)
-    )
-  `, (req) => {
-    req.input('mesaID',         sql.UniqueIdentifier, data.mesaID        ?? null);
-    req.input('meseroID',       sql.UniqueIdentifier, meseroID);
-    req.input('numeroPedido',   sql.Int,              numeroPedido);
-    req.input('tipoPedido',     sql.NVarChar,         data.tipoPedido    ?? 'Mesa');
-    req.input('nombreCliente',  sql.NVarChar,         data.nombreCliente ?? null);
-    req.input('numeroPersonas', sql.Int,              data.numeroPersonas ?? 1);
-    req.input('subtotal',       sql.Decimal(18, 2),   subtotal);
-    req.input('totalCuenta',    sql.Decimal(18, 2),   totalCuenta);
-    req.input('notasGenerales', sql.NVarChar,         data.notasGenerales ?? null);
-  });
+  let pedidoID: string;
+  let numeroPedido: number;
 
-  const pedidoID = pedidoRows[0].PedidoID;
+  try {
+    if (data.mesaID) {
+      const bloqueo = await new sql.Request(tx)
+        .input('mesaID', sql.UniqueIdentifier, data.mesaID)
+        .query(`
+          SELECT MesaID FROM modu_rest_Mesas WITH (UPDLOCK, HOLDLOCK)
+          WHERE MesaID = @mesaID
+        `);
+      if (bloqueo.recordset.length === 0)
+        throw new AppError('Mesa no encontrada', 404);
 
-  // 4. Crear comanda
-  const comandaRows = await query<{ ComandaID: string }>(`
-    INSERT INTO modu_rest_Comandas (PedidoID, NumeroRonda, Estado)
-    OUTPUT INSERTED.ComandaID
-    VALUES (@pedidoID, 1, 'Pendiente')
-  `, (req) => {
-    req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
-  });
+      const ocupada = await new sql.Request(tx)
+        .input('mesaID', sql.UniqueIdentifier, data.mesaID)
+        .query(`
+          SELECT COUNT(*) AS total
+          FROM modu_rest_Pedidos WITH (UPDLOCK, HOLDLOCK)
+          WHERE MesaID = @mesaID
+            AND EstadoPedido IN ('Abierto', 'Por Pagar')
+        `);
+      if (ocupada.recordset[0].total > 0)
+        throw new AppError('Esta mesa ya tiene un pedido activo', 409);
+    }
 
-  const comandaID = comandaRows[0].ComandaID;
+    // El consecutivo también se calculaba sin bloqueo (de ahí que los
+    // duplicados compartan NumeroPedido). Con UPDLOCK+HOLDLOCK sobre el
+    // rango del día, dos pedidos simultáneos ya no reciben el mismo número.
+    const numRows = await new sql.Request(tx).query(`
+      SELECT ISNULL(MAX(NumeroPedido), 0) + 1 AS siguiente
+      FROM modu_rest_Pedidos WITH (UPDLOCK, HOLDLOCK)
+      WHERE CAST(FechaApertura AS DATE) = CAST(SYSUTCDATETIME() AS DATE)
+    `);
+    numeroPedido = numRows.recordset[0].siguiente;
 
-  // 5. Insertar ítems — MontoIVA = 0 porque precio ya lo incluye
-  for (const item of itemsConPrecio) {
-    await query(`
-      INSERT INTO modu_rest_ComandaDetalle (
-        ComandaID, PedidoID, IdArticulo, NombreArticulo,
-        Cantidad, PrecioVentaHistorico,
-        PorcentajeIVA, MontoIVA, MontoDescuento,
-        Subtotal, EstadoItem, NotasEspeciales
-      )
-      VALUES (
-        @comandaID, @pedidoID, @articuloID, @nombreArticulo,
-        @cantidad, @precioVenta,
-        0, 0, 0,
-        @subtotal, 'Pendiente', @notasEspeciales
-      )
-    `, (req) => {
-      req.input('comandaID',       sql.UniqueIdentifier, comandaID);
-      req.input('pedidoID',        sql.UniqueIdentifier, pedidoID);
-      req.input('articuloID',      sql.Int,              item.articuloID);
-      req.input('nombreArticulo',  sql.NVarChar,         item.nombre);
-      req.input('cantidad',        sql.Decimal(10, 2),   item.cantidad);
-      req.input('precioVenta',     sql.Decimal(18, 2),   item.precioVenta);
-      req.input('subtotal',        sql.Decimal(18, 2),   item.itemSubtotal);
-      req.input('notasEspeciales', sql.NVarChar,         item.notasEspeciales ?? null);
-    });
+    const pedidoRows = await new sql.Request(tx)
+      .input('mesaID',         sql.UniqueIdentifier, data.mesaID        ?? null)
+      .input('meseroID',       sql.UniqueIdentifier, meseroID)
+      .input('numeroPedido',   sql.Int,              numeroPedido)
+      .input('tipoPedido',     sql.NVarChar,         data.tipoPedido    ?? 'Mesa')
+      .input('nombreCliente',  sql.NVarChar,         data.nombreCliente ?? null)
+      .input('numeroPersonas', sql.Int,              data.numeroPersonas ?? 1)
+      .input('subtotal',       sql.Decimal(18, 2),   subtotal)
+      .input('totalCuenta',    sql.Decimal(18, 2),   totalCuenta)
+      .input('notasGenerales', sql.NVarChar,         data.notasGenerales ?? null)
+      .query(`
+        INSERT INTO modu_rest_Pedidos (
+          MesaID, MeseroID, NumeroPedido, TipoPedido,
+          NombreCliente, NumeroPersonas, EstadoPedido,
+          Subtotal, TotalImpuestos, TotalDescuento, TotalCuenta,
+          NotasGenerales, MesaAlias
+        )
+        OUTPUT INSERTED.PedidoID
+        VALUES (
+          @mesaID, @meseroID, @numeroPedido, @tipoPedido,
+          @nombreCliente, @numeroPersonas, 'Abierto',
+          @subtotal, 0, 0, @totalCuenta,
+          @notasGenerales,
+          (SELECT Alias FROM modu_rest_Mesas WHERE MesaID = @mesaID)
+        )
+      `);
+    pedidoID = pedidoRows.recordset[0].PedidoID;
+
+    const comandaRows = await new sql.Request(tx)
+      .input('pedidoID', sql.UniqueIdentifier, pedidoID)
+      .query(`
+        INSERT INTO modu_rest_Comandas (PedidoID, NumeroRonda, Estado)
+        OUTPUT INSERTED.ComandaID
+        VALUES (@pedidoID, 1, 'Pendiente')
+      `);
+    const comandaID = comandaRows.recordset[0].ComandaID;
+
+    // MontoIVA = 0 porque el precio ya lo incluye
+    for (const item of itemsConPrecio) {
+      await new sql.Request(tx)
+        .input('comandaID',       sql.UniqueIdentifier, comandaID)
+        .input('pedidoID',        sql.UniqueIdentifier, pedidoID)
+        .input('articuloID',      sql.Int,              item.articuloID)
+        .input('nombreArticulo',  sql.NVarChar,         item.nombre)
+        .input('cantidad',        sql.Decimal(10, 2),   item.cantidad)
+        .input('precioVenta',     sql.Decimal(18, 2),   item.precioVenta)
+        .input('subtotal',        sql.Decimal(18, 2),   item.itemSubtotal)
+        .input('notasEspeciales', sql.NVarChar,         item.notasEspeciales ?? null)
+        .query(`
+          INSERT INTO modu_rest_ComandaDetalle (
+            ComandaID, PedidoID, IdArticulo, NombreArticulo,
+            Cantidad, PrecioVentaHistorico,
+            PorcentajeIVA, MontoIVA, MontoDescuento,
+            Subtotal, EstadoItem, NotasEspeciales
+          )
+          VALUES (
+            @comandaID, @pedidoID, @articuloID, @nombreArticulo,
+            @cantidad, @precioVenta,
+            0, 0, 0,
+            @subtotal, 'Pendiente', @notasEspeciales
+          )
+        `);
+    }
+
+    await tx.commit();
+  } catch (err) {
+    try { await tx.rollback(); } catch { /* ya abortada por SQL Server */ }
+
+    // 2601/2627: violación del índice único → otra petición ganó la carrera
+    const num = (err as { number?: number })?.number
+             ?? (err as { originalError?: { info?: { number?: number } } })?.originalError?.info?.number;
+    if (num === 2601 || num === 2627)
+      throw new AppError('Esta mesa ya tiene un pedido activo', 409);
+    throw err;
   }
 
   // 6. Cambiar estado de la mesa
