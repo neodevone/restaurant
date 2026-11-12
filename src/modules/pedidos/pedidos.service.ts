@@ -390,7 +390,10 @@ export async function abrirPedido(
 
 // Ventana para considerar una ronda idéntica como envío repetido
 // (doble toque en "Enviar" o reintento de la app con mala señal).
-export const VENTANA_RONDA_DUPLICADA_MS = 10_000;
+// Debe ser MAYOR que el timeout de los clientes (app 15 s, escritorio
+// 30 s): si la respuesta se pierde, el reintento llega después del
+// timeout. Con 10 s el reintento pasaba como ronda nueva (QA, caso D3).
+export const VENTANA_RONDA_DUPLICADA_MS = 45_000;
 
 // Firma de una ronda: artículos + cantidades + notas, sin importar el orden.
 function firmaRonda(items: { articuloID: number; cantidad: number; notasEspeciales?: string | null }[]): string {
@@ -840,37 +843,65 @@ export async function cancelarPedido(
   if (pedido.estadoPedido === 'Pagado')
     throw new AppError('No se puede cancelar un pedido ya pagado', 409);
 
-  // Un pedido con pagos ya registrados (abono parcial, fiado) no se puede
-  // cancelar de un tirón: ese dinero quedaría cobrado sobre un pedido que
-  // ya no existe. Primero hay que anular esos pagos.
-  const pagos = await query<{ pagado: number }>(`
-    SELECT ISNULL(SUM(pa.MontoPagado - pa.Vuelto), 0) AS pagado
-    FROM modu_rest_Pagos pa
-    WHERE pa.PedidoID = @pedidoID AND pa.Anulado = 0
-  `, (req) => {
-    req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
-  });
+  // Revisión de pagos y las dos actualizaciones en UNA transacción con el
+  // mismo bloqueo del pedido que usan agregarRonda y registrarPago. Antes,
+  // una ronda que entraba entre los dos UPDATE quedaba "Pendiente" en un
+  // pedido Cancelado, y un cobro simultáneo podía colarse tras la revisión.
+  const pool = await getPool();
+  const tx   = new sql.Transaction(pool);
+  await tx.begin(sql.ISOLATION_LEVEL.READ_COMMITTED);
 
-  if (pagos[0].pagado > 0)
-    throw new AppError(
-      'Este pedido ya tiene pagos registrados. Anúlalos antes de cancelar el pedido.',
-      409);
+  try {
+    const bloqueo = await new sql.Request(tx)
+      .input('pedidoID', sql.UniqueIdentifier, pedidoID)
+      .query(`
+        SELECT EstadoPedido AS estadoPedido
+        FROM modu_rest_Pedidos WITH (UPDLOCK, HOLDLOCK)
+        WHERE PedidoID = @pedidoID
+      `);
+    if (bloqueo.recordset.length === 0)
+      throw new AppError('Pedido no encontrado', 404);
+    // Se vuelve a mirar con el bloqueo: pudo cobrarse en el intertanto
+    if (bloqueo.recordset[0].estadoPedido === 'Pagado')
+      throw new AppError('No se puede cancelar un pedido ya pagado', 409);
 
-  await query(`
-    UPDATE modu_rest_Pedidos
-    SET EstadoPedido = 'Cancelado', FechaCierre = SYSUTCDATETIME()
-    WHERE PedidoID = @pedidoID
-  `, (req) => {
-    req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
-  });
+    // Un pedido con pagos ya registrados (abono parcial, fiado) no se puede
+    // cancelar de un tirón: ese dinero quedaría cobrado sobre un pedido que
+    // ya no existe. Primero hay que anular esos pagos.
+    const pagos = await new sql.Request(tx)
+      .input('pedidoID', sql.UniqueIdentifier, pedidoID)
+      .query(`
+        SELECT ISNULL(SUM(pa.MontoPagado - pa.Vuelto), 0) AS pagado
+        FROM modu_rest_Pagos pa
+        WHERE pa.PedidoID = @pedidoID AND pa.Anulado = 0
+      `);
 
-  await query(`
-    UPDATE modu_rest_Comandas
-    SET Estado = 'Cancelada'
-    WHERE PedidoID = @pedidoID AND Estado NOT IN ('Lista', 'Cancelada')
-  `, (req) => {
-    req.input('pedidoID', sql.UniqueIdentifier, pedidoID);
-  });
+    if (pagos.recordset[0].pagado > 0)
+      throw new AppError(
+        'Este pedido ya tiene pagos registrados. Anúlalos antes de cancelar el pedido.',
+        409);
+
+    await new sql.Request(tx)
+      .input('pedidoID', sql.UniqueIdentifier, pedidoID)
+      .query(`
+        UPDATE modu_rest_Pedidos
+        SET EstadoPedido = 'Cancelado', FechaCierre = SYSUTCDATETIME()
+        WHERE PedidoID = @pedidoID
+      `);
+
+    await new sql.Request(tx)
+      .input('pedidoID', sql.UniqueIdentifier, pedidoID)
+      .query(`
+        UPDATE modu_rest_Comandas
+        SET Estado = 'Cancelada'
+        WHERE PedidoID = @pedidoID AND Estado NOT IN ('Lista', 'Cancelada')
+      `);
+
+    await tx.commit();
+  } catch (err) {
+    try { await tx.rollback(); } catch { /* ya abortada por SQL Server */ }
+    throw err;
+  }
 
   if (pedido.mesaID) {
     await cambiarEstadoMesa(pedido.mesaID, 'Libre');
