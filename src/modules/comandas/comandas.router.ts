@@ -13,9 +13,11 @@ export const comandasRouter = Router();
 comandasRouter.use(authMiddleware);
 
 const lectura = requireRol('Administrador', 'Mesero', 'Cajero');
-// Solo quien atiende la mesa confirma la entrega. El cajero no:
-// él no ve si los platos llegaron.
-const entrega = requireRol('Administrador', 'Mesero');
+// La entrega la confirma normalmente el mesero desde la app. El cajero
+// también puede hacerlo desde el escritorio: a veces al mesero se le
+// olvida y el cliente ya está en caja para pagar. Queda registrado
+// quién la marcó (Comandas.DespachadaPor).
+const entrega = requireRol('Administrador', 'Mesero', 'Cajero');
 
 // ── Rutas por pedido (van antes de '/:id') ───────────
 

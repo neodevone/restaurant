@@ -3,6 +3,7 @@
 // No crea ni modifica artículos — solo consulta
 
 import { query, sql } from '../../config/database';
+import { joinMenu, nombreCategoria, ordenCategoria, categoriaVisible } from '../../shared/menuCategorias';
 import { AppError } from '../../middlewares/error.middleware';
 import path from 'path';
 import fs from 'fs';
@@ -26,6 +27,8 @@ export interface Articulo {
   precioVenta: number;
   precioCosto: number | null;
   porcentajeIVA: number;
+  /** Ruta de la imagen en la BD; el controlador la entrega como URL completa. */
+  imagenURL?: string | null;
 }
 
 // ── CATEGORÍAS ───────────────────────────────────────
@@ -34,11 +37,16 @@ export interface Articulo {
 export async function listarCategorias(): Promise<Categoria[]> {
   return query<Categoria>(`
     SELECT
-      idCategoria AS categoriaID,
-      Nombre      AS nombre
-    FROM categorias
-    WHERE Nombre NOT IN ('INSUMOS COCINA', 'PRODUCTOS INVENTARIO')
-    ORDER BY Orden, Nombre
+      c.idCategoria              AS categoriaID,
+      ${nombreCategoria('c')}    AS nombre
+    FROM categorias c
+    ${joinMenu('c')}
+    WHERE ${categoriaVisible('c')}
+      -- Sin pestañas vacías: el contable tiene categorías sin productos
+      -- (p. ej. "CATEGORIA 10") que no deben salir en la carta.
+      AND EXISTS (SELECT 1 FROM articulo a
+                   WHERE a.IdCategoria = c.idCategoria AND a.Estado = 1 AND a.Venta > 0)
+    ORDER BY ${ordenCategoria()}, ${nombreCategoria('c')}
   `);
 }
 
@@ -54,7 +62,7 @@ export async function listarArticulos(
     SELECT
       a.Id            AS articuloID,
       a.IdCategoria   AS categoriaID,
-      c.Nombre  AS categoriaNombre,
+      ${nombreCategoria('c')} AS categoriaNombre,
       a.Nombre        AS nombre,
       a.CodBar        AS codigoBarras,
       1               AS esVendible,
@@ -64,15 +72,16 @@ export async function listarArticulos(
       ISNULL(t.Num, 0) AS porcentajeIVA,
       img.ImagenURL   AS imagenURL    -- ← nueva columna para la URL de la imagen
     FROM articulo a
-    INNER JOIN categorias c ON a.IdCategoria = c.idCategoria  -- ← LEFT a INNER
+    INNER JOIN categorias c ON a.IdCategoria = c.idCategoria
+    ${joinMenu('c')}
     LEFT JOIN tarifas t ON a.Idiva = t.Id
     LEFT JOIN modu_rest_ArticulosImagenes img ON a.Id = img.IdArticulo  -- ← nuevo
     WHERE
       (@soloActivos = 0 OR a.Estado = 1)
       AND a.Venta > 0
       AND (@categoriaID IS NULL OR a.IdCategoria = @categoriaID)
-      AND c.Nombre NOT IN ('INSUMOS COCINA', 'PRODUCTOS INVENTARIO')
-    ORDER BY c.orden, a.Nombre  -- ← ordenar por orden
+      AND ${categoriaVisible('c')}
+    ORDER BY ${ordenCategoria()}, a.Nombre
   `, (req) => {
     req.input('soloActivos', sql.Bit, soloActivos ? 1 : 0);
     req.input('categoriaID', sql.Int, categoriaID ?? null);
@@ -84,7 +93,7 @@ export async function obtenerArticulo(articuloID: number): Promise<Articulo> {
     SELECT
       a.Id            AS articuloID,
       a.IdCategoria   AS categoriaID,
-      c.Nombre  AS categoriaNombre,
+      ${nombreCategoria('c')} AS categoriaNombre,
       a.Nombre        AS nombre,
       a.CodBar        AS codigoBarras,
       1               AS esVendible,
@@ -94,6 +103,7 @@ export async function obtenerArticulo(articuloID: number): Promise<Articulo> {
       ISNULL(t.Num, 0) AS porcentajeIVA
     FROM articulo a
     LEFT JOIN categorias c ON a.IdCategoria = c.idCategoria
+    ${joinMenu('c')}
     LEFT JOIN tarifas t ON a.Idiva = t.Id
     WHERE a.Id = @articuloID
   `, (req) => {

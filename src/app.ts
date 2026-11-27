@@ -60,7 +60,11 @@ app.use('/api', limiter);
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-app.set('trust proxy', 1);  // ← agregar aquí
+// Detrás de Cloudflare Tunnel (o cualquier proxy) la API recibe http con
+// X-Forwarded-Proto: https. Confiar en el primer salto hace que
+// req.protocol sea 'https' y las URLs de imágenes salgan con https
+// (Android bloquea http). Ver shared/urlPublica.ts.
+app.set('trust proxy', 1);
 app.use(express.json());
 
 // ── Health check (no requiere auth) ─────────────────

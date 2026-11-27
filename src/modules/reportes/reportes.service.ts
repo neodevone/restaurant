@@ -31,7 +31,7 @@ const HORA_LOCAL = (col: string) =>
   `DATEPART(HOUR, ${col} AT TIME ZONE 'UTC' AT TIME ZONE '${ZONA}')`;
 
 // Estados de pedido que representan una venta consumada
-const ESTADOS_VENTA = `('Pagado', 'Fiado')`;
+export const ESTADOS_VENTA = `('Pagado', 'Fiado')`;
 
 // ── Interfaces ───────────────────────────────────────
 

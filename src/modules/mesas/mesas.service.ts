@@ -46,6 +46,14 @@ export interface MesaConPedido extends Mesa {
   minutosSinEntregar: number | null;
   demorado: boolean;
   puedeCobrar: boolean;
+
+  // ── Notas del mesero ──
+  // Cuántas observaciones trae el pedido activo: notas por artículo
+  // ("sin cebolla") más la nota general. El escritorio pinta un icono
+  // en la tarjeta para que el cajero sepa que hay algo que leer sin
+  // tener que abrir cada mesa.
+  cantidadNotas: number;
+  tieneNotas: boolean;
 }
 
 export type EstadoMesa =
@@ -171,7 +179,12 @@ export async function listarMesasConPedido(): Promise<MesaConPedido[]> {
 
       -- El cajero solo cobra lo que ya se entregó
       CASE WHEN p.PedidoID IS NOT NULL AND ISNULL(cm.pendientes, 0) = 0
-           THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END AS puedeCobrar
+           THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END AS puedeCobrar,
+
+      -- ── Notas del mesero (artículos vigentes + nota general) ──
+      ISNULL(nt.cantidad, 0)                 AS cantidadNotas,
+      CASE WHEN ISNULL(nt.cantidad, 0) > 0
+           THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END AS tieneNotas
 
     FROM modu_rest_Mesas m
     JOIN modu_rest_Zonas z ON m.ZonaID = z.ZonaID
@@ -189,6 +202,17 @@ export async function listarMesasConPedido(): Promise<MesaConPedido[]> {
       FROM modu_rest_Comandas c
       WHERE c.PedidoID = p.PedidoID
     ) cm
+    OUTER APPLY (
+      SELECT
+        (SELECT COUNT(*)
+           FROM modu_rest_ComandaDetalle d
+          WHERE d.PedidoID = p.PedidoID
+            AND d.EstadoItem <> 'Cancelado'
+            AND LEN(LTRIM(RTRIM(ISNULL(d.NotasEspeciales, '')))) > 0)
+        + CASE WHEN LEN(LTRIM(RTRIM(ISNULL(CAST(p.NotasGenerales AS NVARCHAR(500)), '')))) > 0
+               THEN 1 ELSE 0 END                                  AS cantidad
+      WHERE p.PedidoID IS NOT NULL
+    ) nt
     WHERE m.Activa = 1
     ORDER BY z.Orden, z.Nombre,
     -- Ordenamiento natural por alias

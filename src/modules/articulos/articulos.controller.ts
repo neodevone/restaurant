@@ -4,6 +4,7 @@
 import { Request, Response, NextFunction } from 'express';
 
 import { respond } from '../../shared/response.helper';
+import { urlPublica } from '../../shared/urlPublica';
 import {
   listarCategorias,
   listarArticulos,
@@ -36,7 +37,9 @@ export async function getArticulos(
       : undefined;
 
     const data = await listarArticulos(soloActivos, categoriaID);
-    respond.ok(res, data);
+    // En la BD está la ruta; la app y el escritorio reciben la URL completa
+    // con el dominio actual de la API.
+    respond.ok(res, data.map((a) => ({ ...a, imagenURL: urlPublica(req, a.imagenURL) })));
   } catch (err) { next(err); }
 }
 
@@ -74,14 +77,13 @@ export async function postImagen(
       return;
     }
 
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    // Se guarda solo la ruta (sin dominio): así un cambio de dominio no
+    // deja las imágenes apuntando al servidor viejo. ?v= evita la caché.
+    const ruta = `/imagenes/articulos/${id}.jpg?v=${Date.now()}`;
 
-    const timestamp = Date.now();
-    const imagenURL = `${baseUrl}/imagenes/articulos/${id}.jpg?v=${timestamp}`;
+    await guardarImagenArticulo(id, ruta);
 
-    await guardarImagenArticulo(id, imagenURL);
-
-    respond.ok(res, { imagenURL }, 'Imagen actualizada correctamente');
+    respond.ok(res, { imagenURL: urlPublica(req, ruta) }, 'Imagen actualizada correctamente');
   } catch (err) { next(err); }
 }
 

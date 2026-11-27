@@ -8,6 +8,7 @@
 // muestra al lado como referencia del día, no como acción.
 
 import { query, sql } from '../../config/database';
+import { joinMenu, nombreCategoria, ordenCategoria, categoriaVisible } from '../../shared/menuCategorias';
 import { AppError } from '../../middlewares/error.middleware';
 
 const ZONA = 'SA Pacific Standard Time';
@@ -294,7 +295,7 @@ export async function articulosConfigurables() {
     SELECT
       a.Id          AS articuloID,
       a.Nombre      AS nombre,
-      c.Nombre      AS categoria,
+      ${nombreCategoria('c')} AS categoria,
       a.Venta       AS precioVenta,
       CASE WHEN s.IdArticulo IS NULL
            THEN CAST(0 AS BIT) ELSE CAST(1 AS BIT) END AS enSeguimiento,
@@ -304,10 +305,11 @@ export async function articulosConfigurables() {
       ISNULL(s.Orden, 0)                  AS orden
     FROM articulo a
     INNER JOIN categorias c ON a.IdCategoria = c.idCategoria
+    ${joinMenu('c')}
     LEFT JOIN modu_rest_ArticulosSeguimiento s ON a.Id = s.IdArticulo
     WHERE a.Estado = 1
       AND a.Venta > 0
-      AND c.Nombre NOT IN ('INSUMOS COCINA', 'PRODUCTOS INVENTARIO')
-    ORDER BY c.Orden, a.Nombre
+      AND ${categoriaVisible('c')}
+    ORDER BY ${ordenCategoria()}, a.Nombre
   `);
 }

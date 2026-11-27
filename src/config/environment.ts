@@ -17,6 +17,8 @@ interface Environment {
   socket: {
     corsOrigin: string;
   };
+  /** Dominio público de la API (p. ej. https://api.krocobroaster.com). Opcional. */
+  publicUrl: string;
 }
 
 function requireEnv(key: string): string {
@@ -44,4 +46,5 @@ export const env: Environment = {
   socket: {
     corsOrigin: process.env.SOCKET_CORS_ORIGIN || 'http://localhost:3001',
   },
+  publicUrl: process.env.PUBLIC_URL || '',
 };
